@@ -1,5 +1,7 @@
 # .dotfiles
 
+![Screenshot](screenshot.png)
+
 # Install
 
 1. Clone the .dotfiles to home.
