@@ -69,6 +69,7 @@ plugins=(
 	git-flow
 	history-search-multi-word
 	kubectl
+  notify
 	npm
 	osx
 	tmux
@@ -76,6 +77,9 @@ plugins=(
 
 source $ZSH/oh-my-zsh.sh
 zstyle ":history-search-multi-word" highlight-color "fg=yellow,bold"
+zstyle ':notify:*' error-title "🔥  Error!!!"
+zstyle ':notify:*' success-title "🎉  Success!!!"
+zstyle ':notify:*' activate-terminal yes
 
 # You may need to manually set your language environment
 export LANG=en_US.UTF-8
