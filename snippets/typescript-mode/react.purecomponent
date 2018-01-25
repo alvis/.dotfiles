@@ -1,0 +1,14 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: react.purecomponent
+# key: rp
+# --
+import * as React from 'react';
+
+interface Props {
+}
+
+export default class extends React.PureComponent<Props> {
+  public render(): JSX.Element {
+    return (${1})
+  }
+}

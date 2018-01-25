@@ -1,0 +1,25 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: react.component
+# key: rc
+# --
+import * as React from 'react';
+
+interface Props {
+}
+
+interface State {
+}
+
+export default class extends React.Component<Props, State> {
+  constructor() {
+    super();
+
+    this.state = {
+      ${2}
+    }
+  }
+  
+  public render(): JSX.Element {
+    return (${1})
+  }
+}
