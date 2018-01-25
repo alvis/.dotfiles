@@ -1,0 +1,5 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: import
+# key: import
+# --
+import ${3:* as ${1:$(s-lower-camel-case (file-name-nondirectory yas/text))}} from '${1:module}';$0
