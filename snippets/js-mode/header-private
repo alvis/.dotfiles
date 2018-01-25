@@ -1,0 +1,17 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: header-private
+# key: header-private
+# --
+/*
+ *                           *** CONFIDENTIAL ***
+ * -------------------------------------------------------------------------
+ * Unauthorized copying of this file, via any medium is strictly prohibited.
+ * -------------------------------------------------------------------------
+ *
+ * @summary   $0
+ *
+ * @author    Alvis HT Tang <alvis@hilbert.space>
+ * @license   Proprietary
+ * @copyright Copyright (c) 2018 - All Rights Reserved.
+ * -------------------------------------------------------------------------
+ */
