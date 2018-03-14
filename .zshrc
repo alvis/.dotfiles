@@ -107,6 +107,7 @@ export SSH_KEY_PATH="~/.ssh/id_rsa"
 # alias zshconfig="mate ~/.zshrc"
 # alias ohmyzsh="mate ~/.oh-my-zsh"
 
+alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
 alias vtop="vtop --theme nord"
 
 # Uncomment following line if you want red dots to be displayed while waiting for completion
