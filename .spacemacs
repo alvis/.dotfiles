@@ -327,6 +327,20 @@ values."
    ))
 
 (defun dotspacemacs/user-init ()
+  ;; delete trailing line break
+  (defun delete-trailing-linebreak ()
+    "Deletes all blank lines at the end of the file, even the last one"
+    (interactive)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-max))
+        (delete-blank-lines)
+        (let ((trailnewlines (abs (skip-chars-backward "\n\t"))))
+          (if (> trailnewlines 0)
+              (progn
+                (delete-char trailnewlines)))))))
+
   ;; closing minibuffers
   (defun minibuffer-keyboard-quit ()
     "Abort recursive edit.
