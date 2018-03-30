@@ -457,6 +457,9 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
   (add-hook 'python-mode-hook 'indent-tools-minor-mode)
   (add-hook 'yaml-mode-hook 'indent-tools-minor-mode)
 
+  ;; color
+  (add-hook 'scss-mode-hook 'rainbow-mode)
+
   ;; -------------------------------------------------- ;;
 
   ;; ----- Plugin Settings ----- ;;
