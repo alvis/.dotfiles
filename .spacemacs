@@ -546,6 +546,11 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
 
   ;; ----- Key Bindings ----- ;;
 
+  ;; code folding
+  (global-set-key (kbd "\C-[[;`") 'evil-toggle-fold)
+  (global-set-key (kbd "\C-[[;{") 'evil-open-folds)
+  (global-set-key (kbd "\C-[[;}") 'evil-close-folds)
+
   ;; closing minibuffers
   (define-key evil-normal-state-map (kbd "<escape>") 'keyboard-quit)
   (define-key evil-visual-state-map (kbd "<escape>") 'keyboard-quit)
