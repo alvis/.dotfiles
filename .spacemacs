@@ -73,6 +73,7 @@ values."
    ;; packages, then consider creating a layer. You can also put the
    ;; configuration in `dotspacemacs/user-config'.
    dotspacemacs-additional-packages '(
+     graphql-mode
      indent-tools
      prettier-js
      smart-shift
@@ -493,11 +494,7 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
   (yas-global-mode 1)
 
   ;; prettier
-  (setq prettier-js-args '(
-                        "--single-quote"
-                        "--tab-width" "2"
-                        "--trailing-comma" "none"
-                        ))
+  (add-hook 'graphql-mode-hook 'prettier-js-mode)
   (add-hook 'web-mode-hook 'prettier-js-mode)
   (add-hook 'tide-mode-hook 'prettier-js-mode)
   (add-hook 'typescript-mode-hook 'prettier-js-mode)
