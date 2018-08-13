@@ -470,6 +470,9 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
            "~/.dotfiles"
            user-emacs-directory))
 
+  ;; flycheck
+  (setq flycheck-temp-prefix ".flycheck")
+
   ;; typescript
   (add-to-list 'auto-mode-alist '("\\.tsx\\'" . typescript-mode))
   (flycheck-add-mode 'typescript-tslint 'typescript-mode)
