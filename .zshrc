@@ -89,7 +89,7 @@ zstyle ':notify:*' activate-terminal yes
 export LANG=en_US.UTF-8
 
 # Preferred editor for local and remote sessions
-export EDITOR=nano
+export EDITOR=micro
 # if [[ -n $SSH_CONNECTION ]]; then
 #   export EDITOR='vim'
 # else
