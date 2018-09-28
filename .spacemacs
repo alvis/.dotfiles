@@ -41,6 +41,10 @@ values."
      (ipython-notebook :variables ein:jupyter-default-server-command
                        "/usr/local/bin/jupyter"
                        ein:jupyter-server-args (list "--no-browser"))
+
+     ;; for devops
+     terraform
+
      ;; for general development
      docker
      html
