@@ -507,6 +507,9 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
   (add-hook 'typescript-mode-hook 'prettier-js-mode)
   (diminish 'prettier-js-mode)
 
+  ;; terraform
+  (add-hook 'terraform-mode-hook #'terraform-format-on-save-mode)
+
   ;; -------------------------------------------------- ;;
 
   ;; ----- Styles ----- ;;
