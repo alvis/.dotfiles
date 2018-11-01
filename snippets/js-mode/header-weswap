@@ -1,0 +1,17 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: header-weswap
+# key: header-weswap
+# --
+/*
+ *                           *** CONFIDENTIAL ***
+ * -------------------------------------------------------------------------
+ * Unauthorized copying of this file, via any medium is strictly prohibited.
+ * -------------------------------------------------------------------------
+ *
+ * @summary   $0
+ *
+ * @author    Alvis HT Tang <alvis.tang@weswap.com>
+ * @license   Proprietary
+ * @copyright Copyright (c) `(format-time-string "%Y")` - All Rights Reserved.
+ * -------------------------------------------------------------------------
+ */
