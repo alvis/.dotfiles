@@ -1,0 +1,7 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: comment-detail
+# key: **
+# --
+/*                     *    *    *    *                     *
+ | $0 |
+ *                     *    *    *    *                     */
