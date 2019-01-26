@@ -17,6 +17,7 @@ BULLETTRAIN_PROMPT_ORDER=(
   virtualenv
   git
   cmd_exec_time
+  aws
 )
 
 # Uncomment the following line to use case-sensitive completion.
