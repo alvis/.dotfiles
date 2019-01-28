@@ -18,7 +18,9 @@ BULLETTRAIN_PROMPT_ORDER=(
   git
   cmd_exec_time
   aws
+  kctx
 )
+BULLETTRAIN_KCTX_KCONFIG=~/.kube/config
 
 # Uncomment the following line to use case-sensitive completion.
 # CASE_SENSITIVE="true"
