@@ -140,5 +140,8 @@ source /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 # iTerm Integration
 test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
 
+# NPX shell auto fallback
+source <(npx --shell-auto-fallback zsh)
+
 # Shell Hooks
 eval "$(direnv hook zsh)"
