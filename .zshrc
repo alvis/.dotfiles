@@ -149,3 +149,17 @@ source <(npx --shell-auto-fallback zsh)
 
 # Shell Hooks
 eval "$(direnv hook zsh)"
+
+# [ EXPERIMENTAL ]
+
+# tabtab source for serverless package
+# uninstall by removing these lines or running `tabtab uninstall serverless`
+[[ -f /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/serverless.zsh ]] && . /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/serverless.zsh
+
+# tabtab source for sls package
+# uninstall by removing these lines or running `tabtab uninstall sls`
+[[ -f /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/sls.zsh ]] && . /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/sls.zsh
+
+# tabtab source for slss package
+# uninstall by removing these lines or running `tabtab uninstall slss`
+[[ -f /Users/Alvis/Repositories/weswap/ws-legacy-partner/node_modules/tabtab/.completions/slss.zsh ]] && . /Users/Alvis/Repositories/weswap/ws-legacy-partner/node_modules/tabtab/.completions/slss.zsh
