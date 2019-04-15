@@ -57,11 +57,15 @@ COMPLETION_WAITING_DOTS="false"
 # Would you like to use another custom folder than $ZSH/custom?
 ZSH_CUSTOM=$ZSH/custom
 
+# Do not use autostart, explicitly start/attach session
+# https://github.com/syl20bnr/spacemacs/issues/988
+ZSH_TMUX_AUTOSTART=false
+[[ $TMUX == "" ]] && tmux new-session -A -s sesh
+
 # Which plugins would you like to load? (plugins can be found in ~/.oh-my-zsh/plugins/*)
 # Custom plugins may be added to ~/.oh-my-zsh/custom/plugins/
 # Example format: plugins=(rails git textmate ruby lighthouse)
 # Add wisely, as too many plugins slow down shell startup.
-ZSH_TMUX_AUTOSTART=true
 plugins=(
 	brew
 	docker
