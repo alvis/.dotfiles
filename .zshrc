@@ -120,6 +120,10 @@ alias vtop="vtop --theme nord"
 # Uncomment following line if you want red dots to be displayed while waiting for completion
 COMPLETION_WAITING_DOTS=true
 
+# [ EXPERIMENTAL ]
+# autoenv
+#AUTOENV_ASSUME_YES=true
+#source $(brew --prefix autoenv)/activate.sh
 
 
 # ZSH auto completions
