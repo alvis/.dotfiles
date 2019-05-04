@@ -102,6 +102,12 @@ export EDITOR=micro
 # Compilation flags
 export ARCHFLAGS="-arch x86_64"
 
+# GO
+export GOPATH=$HOME/go
+export GOROOT=/usr/local/opt/go/libexec
+export PATH=$PATH:$GOPATH/bin
+export PATH=$PATH:$GOROOT/bin
+
 # ssh
 export SSH_KEY_PATH="~/.ssh/id_rsa"
 
