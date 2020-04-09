@@ -1,0 +1,5 @@
+# -*- mode: snippet; require-final-newline: nil -*-
+# name: ignore-next
+# key: ignore
+# --
+/* istanbul ignore next */
