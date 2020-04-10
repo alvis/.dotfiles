@@ -17,19 +17,19 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
-#  || google-cloud-sdk: CLI for handling GCS resources
-#  || docker: docker for MacOS
 #  || kns: for switching K8S namespaces and context [ EXPERIMENTAL ]
 #  || > usage
 #  ||   - kns: switch namespace
 #  ||   - ktx: switch context
 #  || kubernetes-cli: CLI for handling K8S resources
+#  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
 brew install\
   awscli\
   blendle/blendle/kns
   kubernetes-cli\
+  derailed/popeye/popeye\
   && true
 
 brew cask install\
