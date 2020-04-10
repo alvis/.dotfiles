@@ -17,6 +17,12 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
+#  || k9s: for probing K8S resource statuses [ EXPERIMENTAL ]
+#  || > usage:
+#  ||   - k9s: show the console
+#  || > keys:
+#  ||   - ctrl + a: list all resource types
+#  ||   - :<resource type>: list resources of the type
 #  || kns: for switching K8S namespaces and context [ EXPERIMENTAL ]
 #  || > usage
 #  ||   - kns: switch namespace
@@ -27,6 +33,7 @@
 
 brew install\
   awscli\
+  derailed/k9s/k9s\
   blendle/blendle/kns
   kubernetes-cli\
   derailed/popeye/popeye\
