@@ -28,6 +28,7 @@
 #  ||   - kns: switch namespace
 #  ||   - ktx: switch context
 #  || kubernetes-cli: CLI for handling K8S resources
+#  || kubespy: observe Kubernetes resources in real time [ EXPERMENTAL ]
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
@@ -36,6 +37,7 @@ brew install\
   derailed/k9s/k9s\
   blendle/blendle/kns
   kubernetes-cli\
+  kubespy\
   derailed/popeye/popeye\
   && true
 
