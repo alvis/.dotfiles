@@ -71,6 +71,10 @@ brew cask install\
   miniconda\
   && true
 
+# setup python environments
+conda env create -f environments/python/datascience.yaml
+python -m ipykernel install --user --name datascience --display-name "Data Science"
+
 # iOS
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
