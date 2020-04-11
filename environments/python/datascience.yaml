@@ -1,0 +1,19 @@
+name: datascience
+channels:
+  - conda-forge
+  - anaconda-fusion
+  - defaults
+dependencies:
+  - python=3.7
+  - flake8 # linter
+  - flake8-docstrings # linter for missing docstring
+  - mypy # linter for typing
+  - black # formatter
+  - dask # dataframe
+  - pyarrow=1.* # parquet file handler
+  - scipy # maths library
+  - statsmodels # tools for statistics
+  - plotly # data visualisation
+  - jupyter # python REPL
+  - sqlalchemy # SQL handling
+  - s3path # pathlib for s3
