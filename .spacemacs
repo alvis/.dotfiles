@@ -502,6 +502,7 @@ then it takes a second \\[keyboard-quit] to abort the minibuffer."
 
   ;; prettier
   (add-hook 'graphql-mode-hook 'prettier-js-mode)
+  (add-hook 'markdown-mode-hook 'prettier-js-mode)
   (add-hook 'web-mode-hook 'prettier-js-mode)
   (add-hook 'tide-mode-hook 'prettier-js-mode)
   (add-hook 'typescript-mode-hook 'prettier-js-mode)
