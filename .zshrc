@@ -1,8 +1,70 @@
-# If you come from bash you might have to change your $PATH.
-# export PATH=$HOME/bin:/usr/local/bin:$PATH
+# //
+# GENERAL OPTIONS
+# //
 
-# Path to your oh-my-zsh installation.
-export ZSH=/Users/Alvis/.oh-my-zsh
+# remove duplicated command history
+setopt hist_ignore_all_dups
+
+# allow any comment starting with a space (` `) will not be remembered in history
+setopt hist_ignore_space
+
+# use case-sensitive completion
+# CASE_SENSITIVE="true"
+
+# display red dots whilst waiting for completion
+COMPLETION_WAITING_DOTS="true"
+
+# disable bi-weekly auto-update checks
+# DISABLE_AUTO_UPDATE="true"
+
+# disable auto-setting terminal title
+# DISABLE_AUTO_TITLE="true"
+
+# disable colors in ls.
+# DISABLE_LS_COLORS="true"
+
+# disable marking untracked files under VCS as dirty
+# NOTE: This makes repository status check for large repositories much faster
+# DISABLE_UNTRACKED_FILES_DIRTY="true"
+
+# enable command auto-correction.
+# ENABLE_CORRECTION="true"
+
+# change the command execution time stamp shown in the history command output
+# NOTE: either "mm/dd/yyyy", "dd.mm.yyyy", or "yyyy-mm-dd"
+# HIST_STAMPS="mm/dd/yyyy"
+
+# use hyphen-insensitive completion
+# HYPHEN_INSENSITIVE="true"
+
+# zsh custom folder
+# ZSH_CUSTOM=$ZSH/custom
+
+# compilation flags
+export ARCHFLAGS="-arch x86_64"
+
+# language environment
+export LANG=en_US.UTF-8
+
+# preferred editor for local and remote sessions
+if [[ -n $SSH_CONNECTION ]]; then
+   export EDITOR='nano'
+else
+   export EDITOR='micro'
+fi
+
+# //
+# TMUX
+# //
+
+# Do not use autostart, explicitly start/attach session
+# https://github.com/syl20bnr/spacemacs/issues/988
+ZSH_TMUX_AUTOSTART=false
+[[ $TMUX == "" ]] && tmux new-session
+
+# //
+# THEME
+# //
 
 # Set name of the theme to load. Optionally, if you set this to "random"
 # it'll load a random theme each time that oh-my-zsh is loaded.
@@ -17,155 +79,107 @@ BULLETTRAIN_PROMPT_ORDER=(
   virtualenv
   git
   cmd_exec_time
-  aws
-  kctx
+  nvm
 )
-BULLETTRAIN_KCTX_KCONFIG=~/.kube/config
 
-# Uncomment the following line to use case-sensitive completion.
-# CASE_SENSITIVE="true"
+# //
+# // PLUGINS
+# //
 
-# Uncomment the following line to use hyphen-insensitive completion. Case
-# sensitive completion must be off. _ and - will be interchangeable.
-# HYPHEN_INSENSITIVE="true"
+# direnv
+eval "$(direnv hook zsh)"
 
-# Uncomment the following line to disable bi-weekly auto-update checks.
-# DISABLE_AUTO_UPDATE="true"
+# path to oh-my-zsh installation
+export ZSH=~/.oh-my-zsh
 
-# Uncomment the following line to change how often to auto-update (in days).
-# export UPDATE_ZSH_DAYS=13
+# MacOS intergration
+# > usage:
+#   - pfd:	return the path of the frontmost Finder window
+#   - pfs:	return the current Finder selection
+#   - cdf:	cd to the current Finder directory
+#   - quick-look: quick-Look a specified file
+plugins=(osx)
 
-# Uncomment the following line to disable colors in ls.
-# DISABLE_LS_COLORS="true"
+# additional completion definitions
+plugins+=(zsh-completions)
+autoload -U compinit && compinit
+  
+# completion support for aws cli
+plugins+=(aws)
 
-# Uncomment the following line to disable auto-setting terminal title.
-# DISABLE_AUTO_TITLE="true"
+# completion support for docker
+plugins+=(docker)
 
-# Uncomment the following line to enable command auto-correction.
-# ENABLE_CORRECTION="true"
+# completion support for git
+plugins+=(git)
 
-# Uncomment the following line to display red dots whilst waiting for completion.
-COMPLETION_WAITING_DOTS="false"
+# desktop notifications for long-running commands
+plugins+=(notify)
 
-# Uncomment the following line if you want to disable marking untracked files
-# under VCS as dirty. This makes repository status check for large repositories
-# much, much faster.
-# DISABLE_UNTRACKED_FILES_DIRTY="true"
+# completion support for npm
+plugins+=(npm)
 
-# Uncomment the following line if you want to change the command execution time
-# stamp shown in the history command output.
-# The optional three formats: "mm/dd/yyyy"|"dd.mm.yyyy"|"yyyy-mm-dd"
-# HIST_STAMPS="mm/dd/yyyy"
+# manage multiple node englines on the system
+plugins+=(zsh-nvm)
 
-# Would you like to use another custom folder than $ZSH/custom?
-ZSH_CUSTOM=$ZSH/custom
+# completion support for kubernetes cluster manager
+plugins+=(kubectl)
 
-# Do not use autostart, explicitly start/attach session
-# https://github.com/syl20bnr/spacemacs/issues/988
-ZSH_TMUX_AUTOSTART=false
-[[ $TMUX == "" ]] && tmux new-session -A -s sesh
 
-# Which plugins would you like to load? (plugins can be found in ~/.oh-my-zsh/plugins/*)
-# Custom plugins may be added to ~/.oh-my-zsh/custom/plugins/
-# Example format: plugins=(rails git textmate ruby lighthouse)
-# Add wisely, as too many plugins slow down shell startup.
-plugins=(
-	brew
-	docker
-	git
-	git-flow
-	history-search-multi-word
-	kubectl
-  notify
-	npm
-	osx
-	tmux
-	)
-
-source $ZSH/oh-my-zsh.sh
+# bind ctrl-r for history searching
+plugins+=(history-search-multi-word)
 zstyle ":history-search-multi-word" highlight-color "fg=yellow,bold"
+
+# enable notification
+plugins+=(notify)
 zstyle ':notify:*' error-title "🔥  Error!!!"
 zstyle ':notify:*' success-title "🎉  Success!!!"
 zstyle ':notify:*' activate-terminal yes
 
-# You may need to manually set your language environment
-export LANG=en_US.UTF-8
+# source oh my zsh
+source $ZSH/oh-my-zsh.sh
 
-# Preferred editor for local and remote sessions
-export EDITOR=micro
-# if [[ -n $SSH_CONNECTION ]]; then
-#   export EDITOR='vim'
-# else
-#   export EDITOR='mvim'
-# fi
+# ZSH auto completions
+#fpath=(/usr/local/share/zsh-completions $fpath)
+#fpath=(/usr/local/share/zsh/site-functions $fpath)
 
-# Compilation flags
-export ARCHFLAGS="-arch x86_64"
+# autosuggest the rest of a command
+source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 
+# ZSH auto jump
+#[[ -s $(brew --prefix)/etc/profile.d/autojump.sh ]] && . $(brew --prefix)/etc/profile.d/autojump.sh
+
+# cd command with an interactive filter
+source $ZSH_CUSTOM/plugins/enhancd/init.sh
+
+# highlight commands whilst they are typed
+source /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+
+# //
 # GO
+# //
+
 export GOPATH=$HOME/go
 export GOROOT=/usr/local/opt/go/libexec
 export PATH=$PATH:$GOPATH/bin
 export PATH=$PATH:$GOROOT/bin
 
-# ssh
+# //
+# SSH
+# //
+
 export SSH_KEY_PATH="~/.ssh/id_rsa"
 
-# Set personal aliases, overriding those provided by oh-my-zsh libs,
-# plugins, and themes. Aliases can be placed here, though oh-my-zsh
-# users are encouraged to define aliases within the ZSH_CUSTOM folder.
-# For a full list of active aliases, run `alias`.
-#
-# Example aliases
-# alias zshconfig="mate ~/.zshrc"
-# alias ohmyzsh="mate ~/.oh-my-zsh"
+# //
+# ALIAS
+# //
 
+# assume aws role with `assume <profile>`
+alias assume=". awsume"
+
+# count the number of files under the current folder
 alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
-alias vtop="vtop --theme nord"
-
-# Uncomment following line if you want red dots to be displayed while waiting for completion
-COMPLETION_WAITING_DOTS=true
-
-# [ EXPERIMENTAL ]
-# autoenv
-#AUTOENV_ASSUME_YES=true
-#source $(brew --prefix autoenv)/activate.sh
-
-
-# ZSH auto completions
-fpath=(/usr/local/share/zsh-completions $fpath)
-
-# ZSH auto suggestion
-source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-
-# ZSH auto jump
-[[ -s $(brew --prefix)/etc/profile.d/autojump.sh ]] && . $(brew --prefix)/etc/profile.d/autojump.sh
-
-# ZSH enhancd
-source $ZSH_CUSTOM/plugins/enhancd/init.sh
-
-# ZSH syntax highlighting
-source /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-
-# iTerm Integration
-test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
 
 # NPX shell auto fallback
 source <(npx --shell-auto-fallback zsh)
-
-# Shell Hooks
-eval "$(direnv hook zsh)"
-
-# [ EXPERIMENTAL ]
-
-# tabtab source for serverless package
-# uninstall by removing these lines or running `tabtab uninstall serverless`
-[[ -f /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/serverless.zsh ]] && . /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/serverless.zsh
-
-# tabtab source for sls package
-# uninstall by removing these lines or running `tabtab uninstall sls`
-[[ -f /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/sls.zsh ]] && . /usr/local/lib/node_modules/serverless/node_modules/tabtab/.completions/sls.zsh
-
-# tabtab source for slss package
-# uninstall by removing these lines or running `tabtab uninstall slss`
-[[ -f /Users/Alvis/Repositories/weswap/ws-legacy-partner/node_modules/tabtab/.completions/slss.zsh ]] && . /Users/Alvis/Repositories/weswap/ws-legacy-partner/node_modules/tabtab/.completions/slss.zsh
