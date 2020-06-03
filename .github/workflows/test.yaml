@@ -1,0 +1,23 @@
+name: continuous integration
+
+on:
+  push:
+    branches:
+      - '**'
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v1
+      - name: link this repo to ~/.dotfiles
+        run: ln -s $(pwd) ~/.dotfiles
+      - name: touch Dropbox folder
+        run: |
+          mkdir -p ~/Dropbox/Documents/Mackup
+          mkdir -p ~/.dropbox
+          echo 0 > ~/.dropbox/host.db
+          echo $HOME/Dropbox | base64 >> ~/.dropbox/host.db
+          ls -al /Users/runner/Dropbox
+      - name: install
+        run: ./init.sh
