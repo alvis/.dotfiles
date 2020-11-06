@@ -180,6 +180,3 @@ alias assume=". awsume"
 
 # count the number of files under the current folder
 alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
-
-# NPX shell auto fallback
-source <(npx --shell-auto-fallback zsh)
