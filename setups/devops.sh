@@ -17,6 +17,7 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
+#  || gcsfuse: mount GCS locally
 #  || k9s: for probing K8S resource statuses [ EXPERIMENTAL ]
 #  || > usage:
 #  ||   - k9s: show the console
@@ -29,15 +30,18 @@
 #  ||   - ktx: switch context
 #  || kubernetes-cli: CLI for handling K8S resources
 #  || kubespy: observe Kubernetes resources in real time [ EXPERMENTAL ]
+#  || osxfuse: mount external file systems
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
 brew install\
   awscli\
+  gcsfuse\
   derailed/k9s/k9s\
   blendle/blendle/kns
   kubernetes-cli\
   kubespy\
+  osxfuse\
   derailed/popeye/popeye\
   && true
 
