@@ -100,31 +100,8 @@ export ZSH=~/.oh-my-zsh
 #   - quick-look: quick-Look a specified file
 plugins=(osx)
 
-# additional completion definitions
-plugins+=(zsh-completions)
-autoload -U compinit && compinit
-  
-# completion support for aws cli
-plugins+=(aws)
-
-# completion support for docker
-plugins+=(docker)
-
-# completion support for git
-plugins+=(git)
-
 # desktop notifications for long-running commands
 plugins+=(notify)
-
-# completion support for npm
-plugins+=(npm)
-
-# manage multiple node englines on the system
-plugins+=(zsh-nvm)
-
-# completion support for kubernetes cluster manager
-plugins+=(kubectl)
-
 
 # bind ctrl-r for history searching
 plugins+=(history-search-multi-word)
@@ -139,15 +116,8 @@ zstyle ':notify:*' activate-terminal yes
 # source oh my zsh
 source $ZSH/oh-my-zsh.sh
 
-# ZSH auto completions
-#fpath=(/usr/local/share/zsh-completions $fpath)
-#fpath=(/usr/local/share/zsh/site-functions $fpath)
-
 # autosuggest the rest of a command
 source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-
-# ZSH auto jump
-#[[ -s $(brew --prefix)/etc/profile.d/autojump.sh ]] && . $(brew --prefix)/etc/profile.d/autojump.sh
 
 # cd command with an interactive filter
 source $ZSH_CUSTOM/plugins/enhancd/init.sh
