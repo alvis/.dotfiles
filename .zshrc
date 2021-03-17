@@ -142,6 +142,14 @@ export PATH=$PATH:$GOROOT/bin
 export SSH_KEY_PATH="~/.ssh/id_rsa"
 
 # //
+# GCP
+# //
+
+export CLOUDSDK_PYTHON="/usr/local/opt/python@3.8/libexec/bin/python"
+source "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.zsh.inc"
+source "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/completion.zsh.inc"
+
+# //
 # ALIAS
 # //
 
