@@ -18,6 +18,7 @@
 # \\
 #  || awscli: CLI for handling AWS resources
 #  || gcsfuse: mount GCS locally
+#  || helm: application manager for k8s
 #  || kind: local K8S installer and manager
 #  || k9s: for probing K8S resource statuses [ EXPERIMENTAL ]
 #  || > usage:
@@ -38,6 +39,7 @@
 brew install\
   awscli\
   gcsfuse\
+  helm\
   derailed/k9s/k9s\
   kind\
   blendle/blendle/kns
