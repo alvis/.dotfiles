@@ -49,7 +49,7 @@ brew install\
   derailed/popeye/popeye\
   && true
 
-brew cask install\
+brew install --cask\
   docker\
   google-cloud-sdk\
   && true
