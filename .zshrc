@@ -113,6 +113,9 @@ zstyle ':notify:*' error-title "🔥  Error!!!"
 zstyle ':notify:*' success-title "🎉  Success!!!"
 zstyle ':notify:*' activate-terminal yes
 
+# enable nvm
+plugins+=(nvm)
+
 # source oh my zsh
 source $ZSH/oh-my-zsh.sh
 
