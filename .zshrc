@@ -2,6 +2,9 @@
 # GENERAL OPTIONS
 # //
 
+# don't complain if no match is found on a glob expression
+setopt +o nomatch
+
 # remove duplicated command history
 setopt hist_ignore_all_dups
 
