@@ -131,7 +131,6 @@ source $ZSH_CUSTOM/plugins/enhancd/init.sh
 # highlight commands whilst they are typed
 source /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
-
 # //
 # GO
 # //
