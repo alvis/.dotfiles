@@ -103,9 +103,6 @@ export ZSH=~/.oh-my-zsh
 #   - quick-look: quick-Look a specified file
 plugins=(osx)
 
-# desktop notifications for long-running commands
-plugins+=(notify)
-
 # bind ctrl-r for history searching
 plugins+=(history-search-multi-word)
 zstyle ":history-search-multi-word" highlight-color "fg=yellow,bold"
