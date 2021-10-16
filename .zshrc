@@ -63,7 +63,7 @@ fi
 # Do not use autostart, explicitly start/attach session
 # https://github.com/syl20bnr/spacemacs/issues/988
 ZSH_TMUX_AUTOSTART=false
-[[ $TMUX == "" ]] && tmux new-session
+[[ $TMUX == "" ]] && tmux new-session -A
 
 # //
 # THEME
