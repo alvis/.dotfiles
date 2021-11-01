@@ -96,5 +96,5 @@ brew install\
 git clone https://github.com/robbyrussell/oh-my-zsh ~/.oh-my-zsh
 wget http://raw.github.com/caiogondim/bullet-train-oh-my-zsh-theme/master/bullet-train.zsh-theme -P ~/.oh-my-zsh/custom/themes/
 git clone https://github.com/b4b4r07/enhancd ~/.oh-my-zsh/custom/plugins/enhancd
-git clone https://github.com/psprint/history-search-multi-word ~/.oh-my-zsh/custom/plugins/history-search-multi-word
+git clone https://github.com/zdharma-continuum/history-search-multi-word ~/.oh-my-zsh/custom/plugins/history-search-multi-word
 git clone http://www.github.com/marzocchi/zsh-notify ~/.oh-my-zsh/custom/plugins/notify
