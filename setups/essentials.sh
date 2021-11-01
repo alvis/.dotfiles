@@ -53,12 +53,12 @@ mackup restore
 
 brew cask install\
   iterm2\
-  && true
+  || true
   
 brew install\
   tmux\
   terminal-notifier\
-  && true
+  || true
 
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 git clone https://github.com/caiogondim/maglev ~/.tmux/plugins/maglev
@@ -78,7 +78,7 @@ brew install\
   zsh-autosuggestions\
   zsh-completions\
   zsh-syntax-highlighting\
-  && true
+  || true
 
 # oh my zsh
 # \\

@@ -38,7 +38,7 @@ brew install\
   gnupg\
   pinentry-mac\
   sops\
-  && true
+  || true
 git lfs install
 
 # update git-redate to the latest version
@@ -66,7 +66,7 @@ nvm alias default system
 
 brew install --cask\
   miniconda\
-  && true
+  || true
 
 # setup python environments
 conda env create -f environments/python/datascience.yaml

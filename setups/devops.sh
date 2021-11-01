@@ -47,9 +47,9 @@ brew install\
   kubespy\
   osxfuse\
   derailed/popeye/popeye\
-  && true
+  || true
 
 brew install --cask\
   docker\
   google-cloud-sdk\
-  && true
+  || true

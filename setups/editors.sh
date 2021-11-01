@@ -23,7 +23,7 @@
 
 brew install\
   ispell\
-  && true
+  || true
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
@@ -34,7 +34,7 @@ brew install\
 brew install\
   micro\
   nano\
-  && true
+  || true
 
 # setup nano
 git clone https://github.com/scopatz/nanorc ~/.nano
@@ -62,4 +62,4 @@ brew services start emacs
 
 npm install -g\
   tern\
-  && true
+  || true

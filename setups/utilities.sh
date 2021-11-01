@@ -49,13 +49,13 @@ brew install\
   ranger\
   rename\
   tree\
-  && true
+  || true
 
 npm install -g\
   csvtojson\
   json2csv\
   prettyjson\
-  && true
+  || true
 
 # network utilities
 
@@ -77,4 +77,4 @@ brew install\
   swaks\
   telnet\
   wget\
-  && true
+  || true
