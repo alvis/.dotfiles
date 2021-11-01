@@ -25,6 +25,15 @@
 # make homebrew 3 compatible with old recipes
 brew style --fix
 
+# install essential utilities
+
+brew install\
+  coreutils\
+  golang\
+  python\
+  node\
+  || true
+
 # configuration files
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
