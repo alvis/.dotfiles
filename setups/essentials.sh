@@ -62,10 +62,6 @@ brew install\
 
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 git clone https://github.com/caiogondim/maglev ~/.tmux/plugins/maglev
-  
-#sudo gem install\
-#  tmuxinator\
-#  && true
 
 # z shell
 
