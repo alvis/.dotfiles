@@ -51,11 +51,8 @@ mackup restore
 #  || maglev: tmux theme
 # //
 
-brew cask install\
-  iterm2\
-  || true
-  
 brew install\
+  iterm2\
   tmux\
   terminal-notifier\
   || true

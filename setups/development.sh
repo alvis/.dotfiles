@@ -64,7 +64,7 @@ nvm alias default system
 #  || miniconda: manage python environmemnt
 # //
 
-brew install --cask\
+brew install\
   miniconda\
   || true
 

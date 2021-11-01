@@ -17,7 +17,9 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
+#  || docker: spin up a virtual environment
 #  || gcsfuse: mount GCS locally
+#  || google-cloud-sdk: CLI for handling GCP resources
 #  || helm: application manager for k8s
 #  || kind: local K8S installer and manager
 #  || k9s: for probing K8S resource statuses [ EXPERIMENTAL ]
@@ -30,7 +32,7 @@
 #  || > usage
 #  ||   - kns: switch namespace
 #  ||   - ktx: switch context
-#  || kubernetes-cli: CLI for handling K8S resources
+#  || kubectl: CLI for handling K8S resources
 #  || kubespy: observe Kubernetes resources in real time [ EXPERMENTAL ]
 #  || osxfuse: mount external file systems
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
@@ -38,18 +40,15 @@
 
 brew install\
   awscli\
+  docker\
   gcsfuse\
+  google-cloud-sdk\
   helm\
   derailed/k9s/k9s\
   kind\
-  blendle/blendle/kns
-  kubernetes-cli\
+  blendle/blendle/kns\
+  kubectl\
   kubespy\
   osxfuse\
   derailed/popeye/popeye\
-  || true
-
-brew install --cask\
-  docker\
-  google-cloud-sdk\
   || true
