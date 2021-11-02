@@ -51,9 +51,9 @@ export LANG=en_US.UTF-8
 
 # preferred editor for local and remote sessions
 if [[ -n $SSH_CONNECTION ]]; then
-   export EDITOR='nano'
-else
    export EDITOR='micro'
+else
+   export EDITOR='emacsclient'
 fi
 
 # //
@@ -176,3 +176,6 @@ alias assume=". awsume"
 
 # count the number of files under the current folder
 alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
+
+# edit a file via the default editor
+alias edit="$EDITOR"
