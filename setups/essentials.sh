@@ -44,8 +44,8 @@ brew install\
 
 # restore dotfiles
 brew install mackup
-pip install dotfiles
-ln -s ${BASH_SOURCE%/*}/../.dotfilesrc ~/.dotfilesrc
+pip3 install dotfiles
+ln -s $(grealpath --relative-to ~ ${BASH_SOURCE%/*}/../.dotfilesrc) ~/.dotfilesrc
 dotfiles --sync
 mackup restore
 
