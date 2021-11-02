@@ -29,11 +29,13 @@ brew install\
 # \\
 #  || micro: modern terminal-based text editor
 #  || nano: simple terminal-based text editor
+#  || visual-studio-code: modern GUI-based text editor
 # //
 
 brew install\
   micro\
   nano\
+  visual-studio-code\
   || true
 
 # setup nano
