@@ -43,7 +43,7 @@ brew install\
   the_silver_searcher\
   buku\
   direnv\
-  jhawthorn/fzy/fzy
+  jhawthorn/fzy/fzy\
   grc\
   htop\
   ranger\

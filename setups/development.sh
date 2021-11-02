@@ -26,7 +26,7 @@
 #  ||   git redate --commits <number of commits>
 #  ||   git redate --all
 #  || gnupg: for key management
-#  || pinentry-mac: for entering gnupg credential 
+#  || pinentry-mac: for entering gnupg credential
 #  || sops: for secret storage in a repo
 # //
 
