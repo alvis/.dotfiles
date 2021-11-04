@@ -41,6 +41,9 @@ brew install\
   || true
 git lfs install
 
+# setup pinentry
+echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.conf
+
 # update git-redate to the latest version
 rm -f $(greadlink -f /usr/local/bin/git-redate)
 curl -Lo $(greadlink -f /usr/local/bin/git-redate)\
