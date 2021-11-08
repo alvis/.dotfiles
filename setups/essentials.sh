@@ -21,6 +21,11 @@
 
 # install homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+[ -e /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" || eval "$(/usr/local/bin/brew shellenv)"
+echo "eval \"\$($(brew --prefix)/bin/brew shellenv)\"" > ~/.zprofile
+
+# set PATH for startup scripts loaded via launchctl
+sudo launchctl config user path $PATH
 
 # make homebrew 3 compatible with old recipes
 brew style --fix
