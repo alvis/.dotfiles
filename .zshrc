@@ -101,7 +101,7 @@ export ZSH=~/.oh-my-zsh
 #   - pfs:	return the current Finder selection
 #   - cdf:	cd to the current Finder directory
 #   - quick-look: quick-Look a specified file
-plugins=(osx)
+plugins=(macos)
 
 # bind ctrl-r for history searching
 plugins+=(history-search-multi-word)
