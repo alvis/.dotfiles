@@ -53,7 +53,8 @@ export LANG=en_US.UTF-8
 if [[ -n $SSH_CONNECTION ]]; then
    export EDITOR='micro'
 else
-   export EDITOR='emacsclient'
+   # open a file using the emacs deamon with a new frame on the current screen
+   export EDITOR='emacsclient -c'
 fi
 
 # //
