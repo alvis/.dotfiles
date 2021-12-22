@@ -116,6 +116,9 @@ zstyle ':notify:*' activate-terminal yes
 # enable nvm
 plugins+=(zsh-nvm)
 
+# enable aws
+plugins+=(aws)
+
 # source oh my zsh
 source $ZSH/oh-my-zsh.sh
 
