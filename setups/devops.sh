@@ -17,6 +17,10 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
+#  || aws-vault: AWS credential management
+#  || > usage
+#  ||   - aws-vault login <profile>: open AWS console
+#  ||   - aws-vault exec <profile> -- <command>: run with AWS session token
 #  || docker: spin up a virtual environment
 #  || gcsfuse: mount GCS locally
 #  || google-cloud-sdk: CLI for handling GCP resources
@@ -40,6 +44,7 @@
 
 brew install\
   awscli\
+  aws-vault\
   docker\
   gcsfuse\
   google-cloud-sdk\
