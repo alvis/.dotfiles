@@ -16,6 +16,9 @@
 
 BASE=${BASH_SOURCE%/*}
 
+# need to accept the xcode license before things can continue
+sudo xcodebuild -license accept || true 
+
 # install all essentials
 $BASE/setups/essentials.sh
 
