@@ -22,7 +22,6 @@
 #  ||   - aws-vault login <profile>: open AWS console
 #  ||   - aws-vault exec <profile> -- <command>: run with AWS session token
 #  || docker: spin up a virtual environment
-#  || gcsfuse: mount GCS locally
 #  || google-cloud-sdk: CLI for handling GCP resources
 #  || helm: application manager for k8s
 #  || kind: local K8S installer and manager
@@ -38,7 +37,6 @@
 #  ||   - ktx: switch context
 #  || kubectl: CLI for handling K8S resources
 #  || kubespy: observe Kubernetes resources in real time [ EXPERMENTAL ]
-#  || osxfuse: mount external file systems
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
@@ -46,7 +44,6 @@ brew install\
   awscli\
   aws-vault\
   docker\
-  gcsfuse\
   google-cloud-sdk\
   helm\
   derailed/k9s/k9s\
@@ -54,6 +51,5 @@ brew install\
   blendle/blendle/kns\
   kubectl\
   kubespy\
-  osxfuse\
   derailed/popeye/popeye\
   || true
