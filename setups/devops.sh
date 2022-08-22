@@ -22,6 +22,7 @@
 #  ||   - aws-vault login <profile>: open AWS console
 #  ||   - aws-vault exec <profile> -- <command>: run with AWS session token
 #  || docker: spin up a virtual environment
+#  || flux: GitOps for Kubernetes
 #  || google-cloud-sdk: CLI for handling GCP resources
 #  || helm: application manager for k8s
 #  || kind: local K8S installer and manager
@@ -47,6 +48,7 @@ brew install\
   google-cloud-sdk\
   helm\
   derailed/k9s/k9s\
+  fluxcd/tap/flux\
   kind\
   blendle/blendle/kns\
   kubectl\

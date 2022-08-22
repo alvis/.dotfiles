@@ -164,6 +164,12 @@ unset __conda_setup
 export SSH_KEY_PATH="~/.ssh/id_rsa"
 
 # //
+# DevOps
+# //
+
+command -v flux >/dev/null && . <(flux completion zsh)
+
+# //
 # GCP
 # //
 
