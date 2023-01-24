@@ -189,3 +189,6 @@ alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
 
 # edit a file via the default editor
 alias edit="$EDITOR"
+
+# download a file with wget
+alias download="wget --debug --continue --tries=0 --read-timeout=30 --random-wait"
