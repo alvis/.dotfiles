@@ -192,3 +192,7 @@ alias edit="$EDITOR"
 
 # download a file with wget
 alias download="wget --debug --continue --tries=0 --read-timeout=30 --random-wait"
+
+# add iterm2 integration
+test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
+
