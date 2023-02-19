@@ -61,21 +61,6 @@ git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-
 source ~/.oh-my-zsh/custom/plugins/zsh-nvm
 nvm alias default system
 
-# Python
-
-# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-# \\
-#  || miniconda: manage python environmemnt
-# //
-
-brew install\
-  miniconda\
-  || true
-
-# setup python environments
-conda env create -f environments/python/datascience.yaml
-python -m ipykernel install --user --name datascience --display-name "Data Science"
-
 # iOS
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
