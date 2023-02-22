@@ -132,6 +132,9 @@ source $ZSH_CUSTOM/plugins/enhancd/init.sh
 # highlight commands whilst they are typed
 source $(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
+# enable credential injection via 1password
+source ~/.config/op/plugins.sh || true
+
 # //
 # GO
 # //
