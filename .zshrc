@@ -184,6 +184,9 @@ source "$(brew --prefix)/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/compl
 # ALIAS
 # //
 
+# inject copilot cli's ??, git? & gh? alias
+eval "$(github-copilot-cli alias -- "$0")"
+
 # assume aws role with `assume <profile>`
 alias assume=". awsume"
 
