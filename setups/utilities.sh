@@ -22,7 +22,6 @@
 #  || > usage:
 #  ||   ag <text>
 #  || buku: bookmark manager
-#  || direnv: environment management based on current directory
 #  || csvtojson: convert csv to json
 #  || fzy: fast fuzzy finder for the terminal
 #  || > usage:
@@ -42,7 +41,6 @@
 brew install\
   the_silver_searcher\
   buku\
-  direnv\
   jhawthorn/fzy/fzy\
   grc\
   htop\

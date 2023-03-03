@@ -90,9 +90,6 @@ BULLETTRAIN_PROMPT_ORDER=(
 # // PLUGINS
 # //
 
-# direnv
-eval "$(direnv hook zsh)"
-
 # path to oh-my-zsh installation
 export ZSH=~/.oh-my-zsh
 
@@ -103,6 +100,9 @@ export ZSH=~/.oh-my-zsh
 #   - cdf:	cd to the current Finder directory
 #   - quick-look: quick-Look a specified file
 plugins=(macos)
+
+# direnv
+plugins+=(direnv)
 
 # bind ctrl-r for history searching
 plugins+=(history-search-multi-word)
