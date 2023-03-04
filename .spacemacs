@@ -68,7 +68,7 @@ This function should only modify configuration layer settings."
               ibuffer-group-buffers-by 'projects)
      ivy
      spell-checking
-     (syntax-checking :variables syntax-checking-use-original-bitmaps t)
+     (syntax-checking :variables flycheck-indication-mode 'left-fringe)
      (version-control :variables
                       version-control-diff-tool 'git-gutter
                       version-control-global-margin t))
