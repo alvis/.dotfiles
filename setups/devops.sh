@@ -41,10 +41,13 @@
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
+brew install --cask\
+  docker\
+  || true
+
 brew install\
   awscli\
   aws-vault\
-  docker\
   google-cloud-sdk\
   helm\
   derailed/k9s/k9s\
