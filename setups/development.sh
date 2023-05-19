@@ -63,12 +63,3 @@ source ~/.oh-my-zsh/custom/plugins/zsh-nvm
 nvm alias default system
 
 npm install -g @githubnext/github-copilot-cli
-
-# iOS
-
-# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-# \\
-#  || cocoapods: manages library dependencies for xcode projects
-# //
-
-sudo gem install cocoapods
