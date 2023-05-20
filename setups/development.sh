@@ -59,7 +59,5 @@ chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 # //
 
 git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-nvm
-source ~/.oh-my-zsh/custom/plugins/zsh-nvm
-nvm alias default system
 
 npm install -g @githubnext/github-copilot-cli
