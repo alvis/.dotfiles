@@ -108,7 +108,7 @@ plugins+=(history-search-multi-word)
 zstyle ":history-search-multi-word" highlight-color "fg=yellow,bold"
 
 # enable notification
-plugins+=(notify)
+[[ $TERM_PROGRAM == "iTerm.app" ]] && plugins+=(notify)
 zstyle ':notify:*' error-title "🔥  Error!!!"
 zstyle ':notify:*' success-title "🎉  Success!!!"
 zstyle ':notify:*' activate-terminal yes
