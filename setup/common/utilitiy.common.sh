@@ -21,8 +21,11 @@
 #  || the_silver_searcher: text searcher
 #  || > usage:
 #  ||   ag <text>
-#  || buku: bookmark manager
+#  || bat: cat clone with syntax highlighting
 #  || csvtojson: convert csv to json
+#  || eza: modernized version of the classic `ls` command
+#  || > eza -l -T -L 2
+#  || fswatch: monitor file system changes
 #  || fzy: fast fuzzy finder for the terminal
 #  || > usage:
 #  ||   <command to print content> | fzy
@@ -33,26 +36,27 @@
 #  || ranger: file manager for the terminal
 #  || json2csv: convert json to csv
 #  || prettyjson: format json content for better readability
-#  || rename: renames files according to modification rules
-#  || > see: http://plasmasturm.org/code/rename
 #  || tree: list files as a tree
+#  || util-linux: collection of basic system utilities
 # //
 
-brew install\
-  the_silver_searcher\
-  buku\
-  jhawthorn/fzy/fzy\
-  grc\
-  htop\
-  ranger\
-  rename\
-  tree\
+brew install \
+  the_silver_searcher \
+  bat \
+  eza \
+  fswatch \
+  jhawthorn/fzy/fzy \
+  grc \
+  htop \
+  ranger \
+  tree \
+  util-linux \
   || true
 
-npm install -g\
-  csvtojson\
-  json2csv\
-  prettyjson\
+npm install -g \
+  csvtojson \
+  json2csv \
+  prettyjson \
   || true
 
 # network utilities
@@ -61,18 +65,19 @@ npm install -g\
 # \\
 #  || hey: http stress testing utilities
 #  || httpie: HTTP client
-#  || mycli: mysql client
 #  || swaks: email sender
+#  || usql: universal sql client
 #  || telnet: text-oriented TCP/IP client
 #  || wget: file downloader 
 # //
 
 go get -u github.com/rakyll/hey
 
-brew install\
-  httpie\
-  mycli\
-  swaks\
-  telnet\
-  wget\
+brew install \
+  httpie \
+  mycli \
+  swaks \
+  xo/xo/usql \
+  telnet \
+  wget \
   || true

@@ -20,55 +20,31 @@
 # //
 
 # install homebrew
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
-[ -e /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" || eval "$(/usr/local/bin/brew shellenv)"
 echo "eval \"\$($(brew --prefix)/bin/brew shellenv)\"" > ~/.zprofile
-
-# set PATH for startup scripts loaded via launchctl
-sudo launchctl config user path $PATH
 
 # make homebrew 3 compatible with old recipes
 brew style --fix
 
 # install essential utilities
 
-brew install\
-  coreutils\
-  golang\
-  python\
-  node\
+brew install \
+  coreutils \
+  golang \
+  python \
+  node \
   || true
-
-# configuration files
-
-# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-# \\
-#  || mackup: configuration backup manager
-#  || dotfiles: sync .dotfiles to ~/
-# //
-
-# restore dotfiles
-brew install mackup
-pip3 install dotfiles
-ln -s $(grealpath --relative-to ~ ${BASH_SOURCE%/*}/../.dotfilesrc) ~/.dotfilesrc
-dotfiles --sync
-mackup restore
 
 # terminal
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
-#  || iterm: terminal client
 #  || tmux: terminal multiplexer
-#  || terminal-notifier: notification
 #  || tpm: tmux plugin manager
 #  || maglev: tmux theme
 # //
 
-brew install\
-  iterm2\
-  tmux\
-  terminal-notifier\
+brew install \
+  tmux \
   || true
 
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
@@ -84,11 +60,11 @@ git clone https://github.com/caiogondim/maglev ~/.tmux/plugins/maglev
 #  || zsh-syntax-highlighting: highlight commands whilst they are typed
 # //
 
-brew install\
-  zsh\
-  zsh-autosuggestions\
-  zsh-completions\
-  zsh-syntax-highlighting\
+brew install \
+  zsh \
+  zsh-autosuggestions \
+  zsh-completions \
+  zsh-syntax-highlighting \
   || true
 
 # oh my zsh

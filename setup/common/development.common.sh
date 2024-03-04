@@ -6,7 +6,7 @@
 # See the LICENSE file for details.
 # -------------------------------------------------------------------------
 #
-# @summary   Setup for development utilities
+# @summary   Setup for development utilities for all platforms
 #
 # @author    Alvis HT Tang <alvis@hilbert.space>
 # @license   MIT
@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------
 #
 
-# Source Control
+# source control
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
@@ -26,31 +26,26 @@
 #  ||   git redate --commits <number of commits>
 #  ||   git redate --all
 #  || gnupg: for key management
-#  || pinentry-mac: for entering gnupg credential
 #  || sops: for secret storage in a repo
 # //
 
-brew install\
-  git\
-  git-extras\
-  git-lfs\
-  potatolabs/git-redate/git-redate\
-  gnupg\
-  pinentry-mac\
-  sops\
+brew install \
+  git \
+  git-extras \
+  git-lfs \
+  potatolabs/git-redate/git-redate \
+  gnupg \
+  sops \
   || true
 git lfs install
 
-# setup pinentry
-echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.conf
-
 # update git-redate to the latest version
 sudo rm -f $(greadlink -f /usr/local/bin/git-redate)
-sudo curl -Lo $(greadlink -f /usr/local/bin/git-redate)\
+sudo curl -Lo $(greadlink -f /usr/local/bin/git-redate) \
   https://raw.githubusercontent.com/PotatoLabs/git-redate/master/git-redate
 chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 
-# Node
+# node
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
@@ -62,11 +57,15 @@ git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-
 
 npm install -g @githubnext/github-copilot-cli
 
-# Python
+# python
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || poetry: manage python environment
+#  || pdm: manage python environment
 # //
 
-brew install poetry
+brew install \
+  poetry \
+  pdm \
+  || true

@@ -41,20 +41,20 @@
 #  || derailed/popeye/popeye: live k8s issues monitor  [ EXPERIMENTAL ]
 # //
 
-brew install --cask\
-  docker\
+brew install --cask \
+  docker \
   || true
 
-brew install\
-  awscli\
-  aws-vault\
-  google-cloud-sdk\
-  helm\
-  derailed/k9s/k9s\
-  fluxcd/tap/flux\
-  kind\
-  blendle/blendle/kns\
-  kubectl\
-  kubespy\
-  derailed/popeye/popeye\
+brew install \
+  awscli \
+  aws-vault \
+  google-cloud-sdk \
+  helm \
+  derailed/k9s/k9s \
+  fluxcd/tap/flux \
+  kind \
+  blendle/blendle/kns \
+  kubectl \
+  kubespy \
+  derailed/popeye/popeye \
   || true

@@ -43,7 +43,7 @@ $ git clone https://github.com/alvis/.dotfiles ~/.dotfiles
 2. Run the installation script.
 
 ```sh
-$ ~/.dotfiles/init.sh
+$ ~/.dotfiles/setup.sh
 ```
 
 3. In tmux, type `prefix + I` to install packages

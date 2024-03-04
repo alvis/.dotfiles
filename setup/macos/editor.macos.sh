@@ -6,7 +6,7 @@
 # See the LICENSE file for details.
 # -------------------------------------------------------------------------
 #
-# @summary   Setup for editors
+# @summary   Setup editors
 #
 # @author    Alvis HT Tang <alvis@hilbert.space>
 # @license   MIT
@@ -21,9 +21,9 @@
 #  || ispell: spell checking
 # //
 
-brew install\
-  ispell\
-  || true
+brew install \
+  ispell ||
+  true
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
@@ -32,11 +32,11 @@ brew install\
 #  || visual-studio-code: modern GUI-based text editor
 # //
 
-brew install\
-  micro\
-  nano\
-  visual-studio-code\
-  || true
+brew install \
+  micro \
+  nano \
+  visual-studio-code ||
+  true
 
 # setup nano
 git clone https://github.com/scopatz/nanorc ~/.nano
@@ -61,7 +61,3 @@ git clone -b develop https://github.com/syl20bnr/spacemacs ~/.emacs.d
 
 # make emacs run as a service
 brew services start emacs
-
-npm install -g\
-  tern\
-  || true

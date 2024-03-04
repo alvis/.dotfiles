@@ -4,15 +4,22 @@ on:
   push:
     branches:
       - '**'
+
 jobs:
   test:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - name: link this repo to ~/.dotfiles
         run: ln -s $(pwd) ~/.dotfiles
       - name: touch Dropbox folder
+        if: ${{ matrix.os == 'macos-latest' }}
         run: |
           mkdir -p ~/Dropbox/Documents/Mackup
           mkdir -p ~/.dropbox
@@ -20,4 +27,4 @@ jobs:
           echo $HOME/Dropbox | base64 >> ~/.dropbox/host.db
           ls -al /Users/runner/Dropbox
       - name: install
-        run: ./init.sh
+        run: ./setup.sh

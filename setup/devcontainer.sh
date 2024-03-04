@@ -6,7 +6,7 @@
 # See the LICENSE file for details.
 # -------------------------------------------------------------------------
 #
-# @summary   Setup script for an amazing terminal experience
+# @summary   Setup an amazing terminal experience on dev container
 #
 # @author    Alvis HT Tang <alvis@hilbert.space>
 # @license   MIT
@@ -14,22 +14,25 @@
 # -------------------------------------------------------------------------
 #
 
-BASE=${BASH_SOURCE%/*}
+BASE=$(cd "$(dirname "$0")"; pwd -P)
 
-# need to accept the xcode license before things can continue
-sudo xcodebuild -license accept || true 
+# set for automatic installation
+export NONINTERACTIVE=1
+
+# install homebrew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 
 # install all essentials
-$BASE/setups/essentials.sh
+$BASE/common/essential.common.sh
 
 # install CLI utilities
-$BASE/setups/utilities.sh
+$BASE/common/utility.common.sh
 
 # install development environments
-$BASE/setups/development.sh
+$BASE/common/development.common.sh
 
-# install editors
-$BASE/setups/editors.sh
+# setup dotfiles
 
-# install devops utilities
-$BASE/setups/devops.sh
+ln -sf $BASE/../.common.zshrc ~/.zshrc
+ln -sf $BASE/../.tmux.conf ~/.tmux.conf
