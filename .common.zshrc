@@ -105,6 +105,7 @@ plugins+=(zsh-nvm)
 plugins+=(aws)
 
 # source oh my zsh
+zstyle ':omz:alpha:lib:git' async-prompt no # disable async prompt for git due to https://github.com/ohmyzsh/ohmyzsh/issues/12328
 source $ZSH/oh-my-zsh.sh
 
 # autosuggest the rest of a command
