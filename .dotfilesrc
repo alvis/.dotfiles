@@ -2,4 +2,4 @@
 repository = ~/.dotfiles
 packages = ['config']
 prefix = .
-ignore = [ '.git', '.gitignore' ]
+ignore = [ '.DS_Store', '.git', '.gitignore', '*.md', '*.png', '*.sh', '*.svg', 'LICENSE', 'setup', 'snippets' ]
