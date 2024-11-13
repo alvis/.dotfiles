@@ -31,6 +31,7 @@ brew install \
   coreutils \
   golang \
   python \
+  pipx \
   node \
   || true
 

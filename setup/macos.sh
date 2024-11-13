@@ -19,6 +19,9 @@ BASE=$(cd "$(dirname "$0")"; pwd -P)
 # set for automatic installation
 export NONINTERACTIVE=1
 
+# set PATH for common tools
+export $PATH:$HOME/.local/bin
+
 # install homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 eval "$(/opt/homebrew/bin/brew shellenv)" || eval "$(/usr/local/bin/brew shellenv)"
