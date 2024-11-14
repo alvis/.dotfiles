@@ -27,6 +27,32 @@ In a nut shell, the .dotfiles in this repository contain:
 3. tons of CLI utilities, from file management to sending email through the terminal
 4. many DevOps tools for AWS and K8S
 
+## Important Notes
+
+### Mackup Compatibility Issue with macOS 14 (Workaround Available)
+
+Mackup's preference syncing is currently broken on macOS 14 due to changes in the operating system's security model. Under the new model, macOS no longer follows symlinked application preferences, causing a reset of preferences every time an application starts. For more details, refer to this [GitHub discussion](https://github.com/lra/mackup/issues/1924).
+
+Despite this issue, you can still manually sync preferences and configurations by copying them to and from cloud storage. This approach avoids the symlink problem, effectively allowing preference synchronization across devices.
+
+#### Copying Preferences and Configurations to Cloud Storage
+
+Run the following command to back up your preferences and remove symlinks:
+
+```bash
+mackup backup --force && mackup uninstall --force
+```
+
+#### Restoring Preferences and Configurations from Cloud Storage
+
+Use this command to restore your preferences and remove symlinks:
+
+```bash
+mackup restore --force && mackup uninstall --force
+```
+
+This workaround ensures you can continue syncing preferences until a permanent solution is available.
+
 ## Installation
 
 **Warning**:
