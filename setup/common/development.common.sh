@@ -43,7 +43,7 @@ git lfs install
 sudo rm -f $(greadlink -f /usr/local/bin/git-redate)
 sudo curl -Lo $(greadlink -f /usr/local/bin/git-redate) \
   https://raw.githubusercontent.com/PotatoLabs/git-redate/master/git-redate
-chmod 555 $(greadlink -f /usr/local/bin/git-redate)
+sudo chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 
 # node
 
