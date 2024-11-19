@@ -63,13 +63,13 @@ Don’t blindly use my settings unless you know what that entails. Use at your o
 1. Clone the .dotfiles to home.
 
 ```sh
-$ git clone https://github.com/alvis/.dotfiles ~/.dotfiles
+git clone https://github.com/alvis/.dotfiles ~/.dotfiles
 ```
 
 2. Run the installation script.
 
 ```sh
-$ ~/.dotfiles/setup.sh
+~/.dotfiles/setup.sh
 ```
 
 3. In tmux, type `prefix + I` to install packages
