@@ -122,6 +122,12 @@ autoload -Uz compinit
 zstyle ':completion:*' menu select
 fpath+=~/.zfunc
 
+## //
+# TOOLS
+# //
+
+export PATH=$PATH:$(brew --prefix)/opt/coreutils/libexec/gnubin
+
 # //
 # GO
 # //

@@ -34,7 +34,7 @@ sudo -S -k -- bash -c "{
 export NONINTERACTIVE=1
 
 # set PATH for common tools
-export $PATH:$HOME/.local/bin
+export PATH=$PATH:$HOME/.local/bin:$(brew --prefix)/opt/coreutils/libexec/gnubin
 
 # install homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
