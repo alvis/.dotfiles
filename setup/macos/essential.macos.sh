@@ -21,9 +21,14 @@ sudo launchctl config user path $PATH
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
-#  || mackup: configuration backup manager
 #  || dotfiles: sync .dotfiles to ~/
+#  || mackup: configuration backup manager
 # //
+
+# restore dotfiles
+pipx install dotfiles
+ln -s $(grealpath --relative-to ~ ${BASH_SOURCE%/*}/../.dotfilesrc) ~/.dotfilesrc
+dotfiles --sync
 
 # install Mackup using Python 3.11 to avoid compatibility issues
 # NOTE: Mackup's dependency, docopt, is incompatible with Python 3.12 and above, see: https://github.com/lra/mackup/issues/1986
@@ -31,11 +36,6 @@ sudo launchctl config user path $PATH
 pipx install --python python3.11 mackup
 
 mackup restore --force && mackup uninstall --force
-
-# restore dotfiles
-pipx install dotfiles
-ln -s $(grealpath --relative-to ~ ${BASH_SOURCE%/*}/../.dotfilesrc) ~/.dotfilesrc
-dotfiles --sync
 
 # terminal
 
