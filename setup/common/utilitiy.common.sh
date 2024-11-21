@@ -43,6 +43,7 @@
 brew install \
   the_silver_searcher \
   bat \
+  csvtojson \
   eza \
   fswatch \
   jhawthorn/fzy/fzy \
