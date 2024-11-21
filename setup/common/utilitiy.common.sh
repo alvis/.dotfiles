@@ -23,6 +23,7 @@
 #  ||   ag <text>
 #  || bat: cat clone with syntax highlighting
 #  || csvtojson: convert csv to json
+#  || direnv: environment variable manager
 #  || eza: modernized version of the classic `ls` command
 #  || > eza -l -T -L 2
 #  || fswatch: monitor file system changes
@@ -44,6 +45,7 @@ brew install \
   the_silver_searcher \
   bat \
   csvtojson \
+  direnv \
   eza \
   fswatch \
   jhawthorn/fzy/fzy \
