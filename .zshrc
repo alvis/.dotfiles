@@ -41,12 +41,6 @@ source $ZSH/oh-my-zsh.sh
 source ~/.config/op/plugins.sh || true
 
 # //
-# SSH
-# //
-
-export SSH_KEY_PATH="~/.ssh/id_rsa"
-
-# //
 # DevOps
 # //
 
