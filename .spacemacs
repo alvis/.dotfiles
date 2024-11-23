@@ -588,6 +588,13 @@ configuration.
 It is mostly for variables that should be set before packages are loaded.
 If you are unsure, try setting them in `dotspacemacs/user-config' first."
 
+  ;; Set custom-file to a separate file
+  (setq custom-file "~/.emacs.d/custom.el")
+
+  ;; Load the custom-file if it exists
+  (when (file-exists-p custom-file)
+    (load custom-file 'no-error 'no-message))
+
   (defun set-exec-path-from-shell-PATH ()
     "Set up Emacs' `exec-path' and PATH environment variable to match
   that used by the user's shell.
