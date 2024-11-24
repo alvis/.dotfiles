@@ -3,3 +3,5 @@ repository = ~/.dotfiles
 packages = ['config']
 prefix = .
 ignore = [ '.DS_Store', '.git', '.gitignore', '*.md', '*.png', '*.sh', '*.svg', 'LICENSE', 'setup', 'snippets' ]
+externals = {
+    '.zsh_history': '~/Library/Mobile Documents/com~apple~CloudDocs/Sync/.zsh_history'}
