@@ -6,7 +6,7 @@
 # See the LICENSE file for details.
 # -------------------------------------------------------------------------
 #
-# @summary   Install essential utilites
+# @summary   Install essential utilities
 #
 # @author    Alvis HT Tang <alvis@hilbert.space>
 # @license   MIT
