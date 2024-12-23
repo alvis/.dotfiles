@@ -44,7 +44,6 @@
 brew install \
   the_silver_searcher \
   bat \
-  csvtojson \
   direnv \
   eza \
   fswatch \
@@ -53,14 +52,14 @@ brew install \
   htop \
   ranger \
   tree \
-  util-linux \
-  || true
+  util-linux ||
+  true
 
 npm install -g \
   csvtojson \
   json2csv \
-  prettyjson \
-  || true
+  prettyjson ||
+  true
 
 # network utilities
 
@@ -71,7 +70,7 @@ npm install -g \
 #  || swaks: email sender
 #  || usql: universal sql client
 #  || telnet: text-oriented TCP/IP client
-#  || wget: file downloader 
+#  || wget: file downloader
 # //
 
 go get -u github.com/rakyll/hey
@@ -82,5 +81,5 @@ brew install \
   swaks \
   xo/xo/usql \
   telnet \
-  wget \
-  || true
+  wget ||
+  true
