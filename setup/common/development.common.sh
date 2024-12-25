@@ -62,10 +62,8 @@ npm install -g @githubnext/github-copilot-cli
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || poetry: manage python environment
-#  || pdm: manage python environment
 # //
 
 brew install \
   poetry \
-  pdm \
   || true
