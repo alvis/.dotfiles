@@ -64,6 +64,6 @@ npm install -g @githubnext/github-copilot-cli
 #  || poetry: manage python environment
 # //
 
-brew install \
+pipx install \
   poetry \
   || true
