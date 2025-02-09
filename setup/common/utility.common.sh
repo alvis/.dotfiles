@@ -65,7 +65,8 @@ npm install -g \
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
-#  || hey: http stress testing utilities
+#  || autocannon: http stress testing utilities with pipeline and better statistics
+#  || hey: http stress testing utilities with http/2 support
 #  || httpie: HTTP client
 #  || swaks: email sender
 #  || usql: universal sql client
@@ -74,6 +75,10 @@ npm install -g \
 # //
 
 go get -u github.com/rakyll/hey
+
+npm install -g \
+  autocannon \
+  || true
 
 brew install \
   httpie \
