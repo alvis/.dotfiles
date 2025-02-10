@@ -14,14 +14,6 @@
 # -------------------------------------------------------------------------
 #
 
-# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-# \\
-#  || homebrew: software package manager
-# //
-
-# install homebrew
-echo "eval \"\$($(brew --prefix)/bin/brew shellenv)\"" > ~/.zprofile
-
 # make homebrew 3 compatible with old recipes
 brew style --fix
 

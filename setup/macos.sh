@@ -33,12 +33,9 @@ sudo -S -k -- bash -c "{
 # set for automatic installation
 export NONINTERACTIVE=1
 
-# set PATH for common tools
-export PATH=$PATH:$HOME/.local/bin:$(brew --prefix)/opt/coreutils/libexec/gnubin
-
 # install homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-eval "$(/opt/homebrew/bin/brew shellenv)" || eval "$(/usr/local/bin/brew shellenv)"
+source $BASE/../.zshenv
 
 # need to accept the xcode license before things can continue
 sudo xcodebuild -license accept || true

@@ -1,3 +1,24 @@
+# bootstrap Homebrew environment variables
+case "$(uname)" in
+Darwin)
+    # macOS:
+    case "$(uname -m)" in
+    arm64) export HOMEBREW_PREFIX="/opt/homebrew" ;;
+    *) export HOMEBREW_PREFIX="/usr/local" ;;
+    esac
+    ;;
+Linux)
+    # linux
+    export HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+    ;;
+*)
+    # unsupported OS
+    echo "FATAL: THIS SETUP DOES NOT SUPPORT $(uname)"
+    ;;
+esac
+
+eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
+
 # //
 # DEVELOPMENT
 # //
