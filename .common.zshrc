@@ -1,3 +1,4 @@
+BASE=$(cd "$(dirname "$0")"; pwd -P)
 
 # //
 # GENERAL OPTIONS
@@ -161,17 +162,11 @@ compinit
 # ALIAS
 # //
 
-# inject copilot cli's ??, git? & gh? alias
-eval "$(github-copilot-cli alias -- "$0")"
-
-# assume aws role with `assume <profile>`
-alias assume=". awsume"
-
-# count the number of files under the current folder
-alias filecount="du -a | cut -d/ -f2 | sort | uniq -c | sort -nr"
-
-# edit a file via the default editor
-alias edit="$EDITOR"
-
-# download a file with wget
-alias download="wget --debug --continue --tries=0 --read-timeout=30 --random-wait"
+# load all aliases
+if [[ -d "$BASE/.aliases.d" ]]; then
+  for file in $BASE/.aliases.d/*.zsh; do
+    source "$file"
+  done
+else
+  echo "WARN: $BASE/.aliases.d not found, skipping aliases"
+fi

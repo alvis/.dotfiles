@@ -34,5 +34,6 @@ $BASE/common/development.common.sh
 
 # setup dotfiles
 
+ln -sf $BASE/../.aliases.d ~/.aliases.d
 ln -sf $BASE/../.common.zshrc ~/.zshrc
 ln -sf $BASE/../.tmux.conf ~/.tmux.conf
