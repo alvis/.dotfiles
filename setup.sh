@@ -18,7 +18,9 @@ BASE=$(cd "$(dirname "$0")"; pwd -P)
 
 # function to check if running inside a Docker container
 is_container() {
-    grep -qE '/docker/|/lxc/' /proc/1/cgroup || [ "$CODESPACES" = "true" ] || [ "$CI" = "true" ]
+    grep -qE '/docker/|/lxc/' /proc/1/cgroup 2>/dev/null || \
+    [ "${CODESPACES:-}" = "true" ] || \
+    [ "${CI:-}" = "true" ]
 }
 
 # function to check if running on macOS

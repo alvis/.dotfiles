@@ -42,16 +42,16 @@ COMPLETION_WAITING_DOTS="true"
 # use hyphen-insensitive completion
 # HYPHEN_INSENSITIVE="true"
 
-# zsh custom folder
-# ZSH_CUSTOM=$ZSH/custom
+# set XDG_CACHE_HOME if not already defined
+: ${XDG_CACHE_HOME:=$HOME/.cache}
 
 # //
 # THEME
 # //
 
-# Set name of the theme to load. Optionally, if you set this to "random"
+# set name of the theme to load. optionally, if you set this to "random"
 # it'll load a random theme each time that oh-my-zsh is loaded.
-# See https://github.com/robbyrussell/oh-my-zsh/wiki/Themes
+# see https://github.com/robbyrussell/oh-my-zsh/wiki/Themes
 ZSH_THEME="bullet-train"
 BULLETTRAIN_PROMPT_CHAR="%F{red}❯%F{yellow}❯%F{green}❯%f"
 BULLETTRAIN_PROMPT_ORDER=(
@@ -72,6 +72,9 @@ BULLETTRAIN_PROMPT_ORDER=(
 # path to oh-my-zsh installation
 export ZSH=~/.oh-my-zsh
 
+# zsh custom folder if not already defined
+: ${ZSH_CUSTOM:=$ZSH/custom} 
+
 # direnv
 plugins=(direnv)
 
@@ -89,14 +92,34 @@ plugins+=(aws)
 zstyle ':omz:alpha:lib:git' async-prompt no # disable async prompt for git due to https://github.com/ohmyzsh/ohmyzsh/issues/12328
 source $ZSH/oh-my-zsh.sh
 
-# autosuggest the rest of a command
-source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+# check if brew is available
+if command -v brew >/dev/null 2>&1; then
+  # autosuggest the rest of a command
+  AUTO_SUGGESTIONS_PATH="$(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+  if [[ -f "$AUTO_SUGGESTIONS_PATH" ]]; then
+    source "$AUTO_SUGGESTIONS_PATH"
+  else
+    echo "WARN: zsh-autosuggestions not found, skipping"
+  fi
+
+  # highlight commands whilst they are typed
+  ZSH_SYNTAX_HIGHLIGHTING_PATH="$(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+  if [[ -f "$ZSH_SYNTAX_HIGHLIGHTING_PATH" ]]; then
+    source "$ZSH_SYNTAX_HIGHLIGHTING_PATH"
+  else
+    echo "WARN: zsh-syntax-highlighting not found, skipping"
+  fi
+else
+  echo "WARN: brew not found, some plugins will not be loaded"
+fi
 
 # cd command with an interactive filter
-source $ZSH_CUSTOM/plugins/enhancd/init.sh
-
-# highlight commands whilst they are typed
-source $(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+ENHANCD_PATH="$ZSH_CUSTOM/plugins/enhancd/init.sh"
+if [[ -f "$ENHANCD_PATH" ]]; then
+  source "$ENHANCD_PATH"
+else
+  echo "WARN: enhancd plugin not found, skipping"
+fi
 
 # //
 # Auto Completion
@@ -168,5 +191,5 @@ if [[ -d "$BASE/.aliases.d" ]]; then
     source "$file"
   done
 else
-  echo "WARN: $BASE/.aliases.d not found, skipping aliases"
+  echo "WARN: ${BASE}/.aliases.d not found, skipping aliases"
 fi
