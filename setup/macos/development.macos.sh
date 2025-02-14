@@ -27,3 +27,13 @@ brew install \
 
 # setup pinentry
 echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.conf
+
+# github extensions
+
+# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+# \\
+#  || gh-dash: dashboard for github
+# //
+brew install gh
+gh extension install github/gh-copilot
+gh extension install dlvhdr/gh-dash

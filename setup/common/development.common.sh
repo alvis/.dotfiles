@@ -50,12 +50,9 @@ sudo chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || nvm: manage node environment
-#  || github-copilot-cli: command line interface for github copilot
 # //
 
 git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-nvm
-
-npm install -g @githubnext/github-copilot-cli
 
 # python
 
