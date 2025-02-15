@@ -88,3 +88,14 @@ brew install \
   telnet \
   wget ||
   true
+
+# file utilities
+
+# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+# \\
+#  || rar: archive manager
+# //
+
+brew install --cask \
+  rar \
+  || true
