@@ -14,6 +14,8 @@
 # -------------------------------------------------------------------------
 #
 
+BASE=$(cd "$(dirname "$0")"; pwd -P)
+
 # set PATH for startup scripts loaded via launchctl
 sudo launchctl config user path $PATH
 
@@ -27,7 +29,7 @@ sudo launchctl config user path $PATH
 
 # restore dotfiles
 pipx install dotfiles
-ln -s $(grealpath --relative-to ~ ${BASH_SOURCE%/*}/../.dotfilesrc) ~/.dotfilesrc
+ln -sf $(grealpath --relative-to ~ ${BASE}/../../.dotfilesrc) ~/.dotfilesrc
 dotfiles --sync
 
 # install Mackup using Python 3.11 to avoid compatibility issues

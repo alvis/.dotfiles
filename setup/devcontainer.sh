@@ -34,6 +34,6 @@ $BASE/common/development.common.sh
 
 # setup dotfiles
 
-ln -sf $BASE/../.aliases.d ~/.aliases.d
-ln -sf $BASE/../.common.zshrc ~/.zshrc
-ln -sf $BASE/../.tmux.conf ~/.tmux.conf
+ln -s $(grealpath --relative-to ~ ${BASE}/../.aliases.d) ~/.aliases.d
+ln -s $(grealpath --relative-to ~ ${BASE}/../.common.zshrc) ~/.common.zshrc
+ln -s $(grealpath --relative-to ~ ${BASE}/../.tmux.conf) ~/.tmux.conf

@@ -54,8 +54,8 @@ $BASE/macos/application.macos.sh
 
 # setup .zshrc
 
-ln -sf $BASE/../.aliases.d ~/.aliases.d
-ln -sf $BASE/../.common.zshrc ~/.common.zshrc
+ln -s $(grealpath --relative-to ~ ${BASE}/../.aliases.d) ~/.aliases.d
+ln -s $(grealpath --relative-to ~ ${BASE}/../.common.zshrc) ~/.common.zshrc
 
 # finish the sudo session
 sudo rm $SUDO_FILE
