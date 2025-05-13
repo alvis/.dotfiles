@@ -45,15 +45,6 @@ sudo curl -Lo $(greadlink -f /usr/local/bin/git-redate) \
   https://raw.githubusercontent.com/PotatoLabs/git-redate/master/git-redate
 sudo chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 
-# node
-
-# \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-# \\
-#  || nvm: manage node environment
-# //
-
-git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-nvm
-
 # python
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
@@ -62,5 +53,5 @@ git clone https://github.com/lukechilds/zsh-nvm ~/.oh-my-zsh/custom/plugins/zsh-
 # //
 
 pipx install \
-  poetry \
-  || true
+  poetry ||
+  true
