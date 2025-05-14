@@ -17,6 +17,11 @@
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
 #  || awscli: CLI for handling AWS resources
+#  || awsume: AWS profile switcher
+#  || > usage
+#  ||   - awsume <profile>: switch to the profile
+#  ||   - awsume <profile> -- <command>: run with AWS session token
+#  ||   - awsume --list: list all profiles
 #  || aws-vault: AWS credential management
 #  || > usage
 #  ||   - aws-vault login <profile>: open AWS console
@@ -47,6 +52,7 @@ brew install --cask \
 
 brew install \
   awscli \
+  awsume \
   aws-vault \
   google-cloud-sdk \
   helm \
