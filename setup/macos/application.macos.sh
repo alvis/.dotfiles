@@ -16,32 +16,27 @@
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
-#  || 1password: password manager
+#  || 1password-cli: password manager
 #  || bartender: menu bar manager
 #  || brave-browser: web browser
 #  || discord: voice and text chat
 #  || google-chrome: web browser
 #  || little-snitch: network monitor
-#  || logit-options-plus: mouse and keyboard manager
 #  || notion: note taking
 #  || slack: team communication
 #  || readdle-spark: email client
-#  || spotify: music player
 #  || telegram: messaging
 # //
  
 brew install --cask \
-  1password \
   1password-cli \
   bartender \
   brave-browser \
   discord \
   google-chrome \
   little-snitch \
-  logi-options-plus \
   notion \
   slack \
   readdle-spark \
-  spotify \
   telegram \
   || true
