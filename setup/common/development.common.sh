@@ -55,3 +55,4 @@ sudo chmod 555 $(greadlink -f /usr/local/bin/git-redate)
 pipx install \
   poetry ||
   true
+

@@ -61,3 +61,4 @@ export PATH=$PATH:$GOROOT/bin
 # PYTHON
 # //
 export PATH=$PATH:$HOME/.local/bin
+

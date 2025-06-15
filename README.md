@@ -17,7 +17,7 @@ This repository contains configurations for CLI commands and X environments, alo
 Welcome, no matter you are looking around how other configure their development environment, or checking me out for my work, welcome.
 This repository serves as my way to help me setup and maintain my Mac.
 It takes the effort out of installing everything manually.
-Everything which is needed to install my preffered setup of macOS is detailed in this readme.
+Everything which is needed to install my preferred setup of macOS is detailed in this readme.
 Feel free to explore, learn and copy parts for your own dotfiles. Enjoy!
 
 In a nut shell, the .dotfiles in this repository contain:
@@ -101,3 +101,4 @@ Your work means the world! :earth_africa: :heart:
 ### License
 
 Copyright © 2017, [Alvis Tang](https://github.com/alvis). Released under the [MIT License](LICENSE).
+

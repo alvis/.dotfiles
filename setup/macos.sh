@@ -60,3 +60,4 @@ ln -s $(grealpath --relative-to ~ ${BASE}/../.common.zshrc) ~/.common.zshrc
 # finish the sudo session
 sudo rm $SUDO_FILE
 sudo -k
+

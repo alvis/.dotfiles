@@ -24,7 +24,7 @@ fi
 # // PLUGINS
 # //
 
-# MacOS intergration
+# MacOS integration
 # > usage:
 #   - pfd:	return the path of the frontmost Finder window
 #   - pfs:	return the current Finder selection
@@ -50,3 +50,4 @@ command -v flux >/dev/null && . <(flux completion zsh)
 
 source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"
 source "$(brew --prefix)/share/google-cloud-sdk/completion.zsh.inc"
+

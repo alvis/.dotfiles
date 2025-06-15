@@ -58,3 +58,4 @@ rm -f ~/.zcompdump
 compinit
 chmod go-w "$(brew --prefix)/share"
 chmod -R go-w "$(brew --prefix)/share/zsh"
+

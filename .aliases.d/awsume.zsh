@@ -4,3 +4,4 @@ if command -v awsume >/dev/null 2>&1; then
 else
     echo "WARN: awsume not found, install with: brew install awsume" >&2
 fi
+

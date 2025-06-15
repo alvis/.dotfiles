@@ -12,3 +12,4 @@ brew deps --installed | \
             if (!(package in dependencies))
                 print package
     }'
+

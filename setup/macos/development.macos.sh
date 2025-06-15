@@ -37,3 +37,4 @@ echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.c
 brew install gh
 gh extension install github/gh-copilot
 gh extension install dlvhdr/gh-dash
+

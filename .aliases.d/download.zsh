@@ -6,3 +6,4 @@ elif command -v curl >/dev/null 2>&1; then
 else
     echo "WARN: wget and curl not found, download alias will not work"
 fi
+

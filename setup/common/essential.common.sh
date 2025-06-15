@@ -6,7 +6,7 @@
 # See the LICENSE file for details.
 # -------------------------------------------------------------------------
 #
-# @summary   Install essential utilites
+# @summary   Install essential utilities
 #
 # @author    Alvis HT Tang <alvis@hilbert.space>
 # @license   MIT
@@ -74,3 +74,4 @@ curl --location --output ~/.oh-my-zsh/custom/themes/bullet-train.zsh-theme http:
 git clone https://github.com/b4b4r07/enhancd ~/.oh-my-zsh/custom/plugins/enhancd
 git clone https://github.com/zdharma-continuum/history-search-multi-word ~/.oh-my-zsh/custom/plugins/history-search-multi-word
 git clone http://www.github.com/marzocchi/zsh-notify ~/.oh-my-zsh/custom/plugins/notify
+

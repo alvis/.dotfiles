@@ -3,3 +3,4 @@
 # key: for
 # --
 for (var i = 0, l = ${num}; i < l; i++) {$0}
+

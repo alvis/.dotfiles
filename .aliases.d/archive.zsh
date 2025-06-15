@@ -312,3 +312,4 @@ compdef _archive_comp archive
 
 _unarchive_comp() { _files -g '*.(rar|zip)(.gpg|)'; }
 compdef _unarchive_comp unarchive
+

@@ -28,3 +28,4 @@ jobs:
           ls -al /Users/runner/Dropbox
       - name: install
         run: ./setup.sh
+
