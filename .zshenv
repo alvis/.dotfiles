@@ -46,7 +46,7 @@ fi
 # TOOLS
 # //
 
-export PATH=$PATH:$(brew --prefix)/opt/coreutils/libexec/gnubin
+export PATH=$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH
 
 # //
 # GO
@@ -54,11 +54,10 @@ export PATH=$PATH:$(brew --prefix)/opt/coreutils/libexec/gnubin
 
 export GOPATH=$HOME/go
 export GOROOT=$(brew --prefix)/opt/go/libexec
-export PATH=$PATH:$GOPATH/bin
-export PATH=$PATH:$GOROOT/bin
+export PATH=$GOPATH/bin:$PATH
+export PATH=$GOROOT/bin:$PATH
 
 # //
 # PYTHON
 # //
-export PATH=$PATH:$HOME/.local/bin
-
+export PATH=$HOME/.local/bin:$PATH
