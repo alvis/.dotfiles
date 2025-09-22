@@ -1,5 +1,3 @@
-BASE=$(cd "$(dirname "$0")"; pwd -P)
-
 # //
 # GENERAL OPTIONS
 # //
@@ -186,6 +184,7 @@ compinit
 # //
 
 # load all aliases
+BASE=$(cd "$(dirname "$0")"; pwd -P)
 if [[ -d "$BASE/.aliases.d" ]]; then
   for file in $BASE/.aliases.d/*.zsh; do
     source "$file"
