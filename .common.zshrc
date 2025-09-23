@@ -114,7 +114,7 @@ fi
 # cd command with an interactive filter
 ENHANCD_PATH="$ZSH_CUSTOM/plugins/enhancd/init.sh"
 if [[ -f "$ENHANCD_PATH" ]]; then
-  source "$ENHANCD_PATH"
+  [ -n "$CLAUDECODE" ] || source "$ENHANCD_PATH"
 else
   echo "WARN: enhancd plugin not found, skipping"
 fi
