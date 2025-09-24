@@ -30,10 +30,7 @@ export ARCHFLAGS="-arch x86_64"
 export LANG=en_US.UTF-8
 
 # preferred editors
-if command -v emacsclient >/dev/null; then
-    # using the emacs deamon with a new frame on the current screen
-    export EDITOR='emacsclient -c'
-elif command -v micro >/dev/null; then
+if command -v micro >/dev/null; then
     export EDITOR='micro'
 elif command -v nano >/dev/null; then
     export EDITOR='nano'
