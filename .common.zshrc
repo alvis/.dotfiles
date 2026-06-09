@@ -86,6 +86,9 @@ plugins+=(zsh-nvm)
 # enable aws
 plugins+=(aws)
 
+# enable docker
+plugins+=(docker)
+
 # source oh my zsh
 zstyle ':omz:alpha:lib:git' async-prompt no # disable async prompt for git due to https://github.com/ohmyzsh/ohmyzsh/issues/12328
 source $ZSH/oh-my-zsh.sh
