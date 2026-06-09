@@ -32,9 +32,10 @@ echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.c
 
 # \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 # \\
+#  || copilot-cli: github copilot cli
+#  || gh: github CLI
 #  || gh-dash: dashboard for github
 # //
-brew install gh
-gh extension install github/gh-copilot
+brew install copilot-cli gh
 gh extension install dlvhdr/gh-dash
 
