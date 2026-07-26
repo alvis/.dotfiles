@@ -63,6 +63,7 @@ BULLETTRAIN_PROMPT_ORDER=(
    custom
    dir
    virtualenv
+   jj
    git
    cmd_exec_time
    nvm
@@ -97,6 +98,10 @@ plugins+=(docker)
 # source oh my zsh
 zstyle ':omz:alpha:lib:git' async-prompt no # disable async prompt for git due to https://github.com/ohmyzsh/ohmyzsh/issues/12328
 source $ZSH/oh-my-zsh.sh
+
+# add a jj segment to the prompt
+# NOTE: must come after oh-my-zsh.sh, which defines the theme's prompt_git
+source $BASE/utilities/jj.zsh
 
 # check if brew is available
 if command -v brew >/dev/null 2>&1; then
