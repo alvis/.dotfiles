@@ -44,6 +44,11 @@ COMPLETION_WAITING_DOTS="true"
 : ${XDG_CACHE_HOME:=$HOME/.cache}
 
 # //
+# PATH
+# //
+BASE=${${(%):-%x}:A:h}
+
+# //
 # THEME
 # //
 
@@ -187,7 +192,6 @@ compinit
 # //
 
 # load all aliases
-BASE=$(cd "$(dirname "$0")"; pwd -P)
 if [[ -d "$BASE/.aliases.d" ]]; then
   for file in $BASE/.aliases.d/*.zsh; do
     source "$file"
