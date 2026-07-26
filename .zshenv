@@ -65,3 +65,8 @@ export PATH=$GOROOT/bin:$PATH
 # PYTHON
 # //
 export PATH=$HOME/.local/bin:$PATH
+
+# //
+# RUST
+# //
+[[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
