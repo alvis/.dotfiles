@@ -1,0 +1,259 @@
+#!/bin/sh
+
+f() {
+    # Git exports repository-local variables when invoking a shell alias. They
+    # override later `git -C <other-worktree>` calls unless explicitly cleared.
+    for git_local_env in \
+        GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+        GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX \
+        GIT_SHALLOW_FILE; do
+        unset "$git_local_env"
+    done
+
+    dry=${GONE_DRY_RUN:-0}
+    if [ "${1-}" = "--dry-run" ]; then
+        dry=1
+        shift
+    fi
+    if [ "$#" -ne 0 ]; then
+        echo "usage: git gone [--dry-run]" >&2
+        return 2
+    fi
+
+    git fetch --all --prune || return
+
+    remote=${GONE_REMOTE:-origin}
+    default_ref=$(git symbolic-ref --quiet "refs/remotes/$remote/HEAD" 2>/dev/null) || {
+        echo "git gone: refs/remotes/$remote/HEAD is not set; run: git remote set-head $remote -a" >&2
+        return 2
+    }
+    default_ref=${default_ref#refs/remotes/}
+    default_tip=$(git rev-parse --verify "$default_ref^{commit}") || return
+
+    echo "default branch: $default_ref"
+
+    patch_id_of_diff() {
+        git diff --no-ext-diff --binary --no-renames "$1" "$2" |
+            git patch-id --stable | awk 'NR == 1 { print $1; exit }'
+    }
+
+    patch_id_of_commit() {
+        git show --no-ext-diff --format= --binary --no-renames "$1" |
+            git patch-id --stable | awk 'NR == 1 { print $1; exit }'
+    }
+
+    git_tip_integrated() {
+        tip=$1
+        git merge-base --is-ancestor "$tip" "$default_tip" && return 0
+
+        base=$(git merge-base "$tip" "$default_tip" 2>/dev/null) || return 1
+        git diff --quiet --no-ext-diff "$base" "$tip" && return 0
+        branch_patch=$(patch_id_of_diff "$base" "$tip")
+        [ -n "$branch_patch" ] || return 1
+
+        for commit in $(git log --first-parent --no-merges --format=%H "$default_tip"); do
+            commit_patch=$(patch_id_of_commit "$commit")
+            [ "$commit_patch" = "$branch_patch" ] && return 0
+        done
+        return 1
+    }
+
+    jj_patch_id_of_diff() {
+        jj --no-pager --ignore-working-copy -R "$1" diff --from "$2" --to "$3" --git |
+            git patch-id --stable | awk 'NR == 1 { print $1; exit }'
+    }
+
+    jj_patch_id_of_commit() {
+        jj --no-pager --ignore-working-copy -R "$1" show --git -r "$2" |
+            git patch-id --stable | awk 'NR == 1 { print $1; exit }'
+    }
+
+    jj_tip_integrated() {
+        jj_repo=$1
+        jj_tip=$2
+
+        jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip & ancestors(trunk())" -T 'commit_id ++ "\n"' 2>/dev/null |
+            grep -qx "$jj_tip" && return 0
+
+        jj_empty=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip" -T 'if(empty, "yes\n", "no\n")' 2>/dev/null)
+        if [ "$jj_empty" = yes ]; then
+            jj_parents=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+                -r "$jj_tip" -T 'parents.map(|p| p.commit_id() ++ "\n")' 2>/dev/null)
+            [ -n "$jj_parents" ] || return 1
+            for jj_parent in $jj_parents; do
+                jj_tip_integrated "$jj_repo" "$jj_parent" || return 1
+            done
+            return 0
+        fi
+
+        jj_base=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "heads(::$jj_tip & ::trunk())" -T 'commit_id ++ "\n"' 2>/dev/null |
+            head -n 1)
+        [ -n "$jj_base" ] || return 1
+        jj_trunk=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph -r 'trunk()' -T 'commit_id ++ "\n"' 2>/dev/null)
+        jj_root_commit=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph -r 'root()' -T 'commit_id ++ "\n"' 2>/dev/null)
+        [ "$jj_trunk" != "$jj_root_commit" ] || return 1
+
+        branch_patch=$(jj_patch_id_of_diff "$jj_repo" "$jj_base" "$jj_tip")
+        [ -n "$branch_patch" ] || return 1
+        for commit in $(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r '::trunk() ~ merges()' -T 'commit_id ++ "\n"' 2>/dev/null); do
+            commit_patch=$(jj_patch_id_of_commit "$jj_repo" "$commit")
+            [ "$commit_patch" = "$branch_patch" ] && return 0
+        done
+        return 1
+    }
+
+    current_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    current_git_root=$(cd "$current_git_root" 2>/dev/null && pwd -P || true)
+
+    first=1
+    wt=
+    head=
+    locked=0
+
+    process_git_worktree() {
+        [ -n "$wt" ] || return
+        if [ "$first" -eq 1 ]; then
+            first=0
+            return
+        fi
+        if [ "$locked" -eq 1 ]; then
+            echo "skip locked worktree: $wt" >&2
+            return
+        fi
+        [ -d "$wt" ] || return
+        canonical=$(cd "$wt" 2>/dev/null && pwd -P) || return
+        if [ "$canonical" = "$current_git_root" ] && [ "$dry" -ne 1 ]; then
+            echo "skip invoking worktree: $wt" >&2
+            return
+        fi
+        [ -z "$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null)" ] || {
+            echo "skip dirty worktree: $wt" >&2
+            return
+        }
+        git_tip_integrated "$head" || return
+        if [ "$dry" -eq 1 ]; then
+            echo "would remove worktree: $wt"
+        else
+            echo "remove worktree: $wt"
+            git worktree remove "$wt" || echo "could not remove worktree: $wt" >&2
+        fi
+    }
+
+    git worktree list --porcelain |
+    {
+        while IFS= read -r line; do
+            if [ -z "$line" ]; then
+                process_git_worktree
+                wt=
+                head=
+                locked=0
+            else
+                case "$line" in
+                    worktree\ *) wt=${line#worktree } ;;
+                    HEAD\ *) head=${line#HEAD } ;;
+                    locked) locked=1 ;;
+                esac
+            fi
+        done
+        process_git_worktree
+    }
+
+    git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads/ |
+        while IFS= read -r branch_tracking; do
+            case "$branch_tracking" in
+                *' [gone]') gone_branch=${branch_tracking% \[gone\]} ;;
+                *) continue ;;
+            esac
+            checked_out_path=$(git worktree list --porcelain |
+                awk -v target="branch refs/heads/$gone_branch" '
+                    /^worktree / { path = substr($0, 10) }
+                    $0 == target { print path; exit }
+                ')
+            if [ -n "$checked_out_path" ]; then
+                if [ "$dry" -eq 1 ]; then
+                    checked_out_root=$(cd "$checked_out_path" 2>/dev/null && pwd -P || true)
+                    checked_out_locked=$(git worktree list --porcelain |
+                        awk -v target="worktree $checked_out_path" '
+                            /^worktree / { in_target = ($0 == target) }
+                            in_target && /^locked([[:space:]]|$)/ { print "yes"; exit }
+                            in_target && /^$/ { exit }
+                        ')
+                    checked_out_head=$(git -C "$checked_out_path" rev-parse --verify HEAD 2>/dev/null || true)
+                    if [ -n "$checked_out_head" ] &&
+                       [ -z "$checked_out_locked" ] &&
+                       [ -z "$(git -C "$checked_out_path" status --porcelain --untracked-files=all 2>/dev/null)" ] &&
+                       git_tip_integrated "$checked_out_head"; then
+                        echo "would delete gone branch after removing worktree: $gone_branch"
+                    else
+                        echo "would keep checked-out gone branch: $gone_branch ($checked_out_path)"
+                    fi
+                else
+                    echo "skip checked-out gone branch: $gone_branch ($checked_out_path)" >&2
+                fi
+                continue
+            fi
+            if [ "$dry" -eq 1 ]; then
+                echo "would delete gone branch: $gone_branch"
+            else
+                echo "delete gone branch: $gone_branch"
+                git branch -D "$gone_branch" || true
+            fi
+        done
+
+    if command -v jj >/dev/null 2>&1; then
+        jj_root=$(jj root 2>/dev/null || true)
+        if [ -n "$jj_root" ]; then
+            jj_current_root=$(cd "$jj_root" 2>/dev/null && pwd -P || true)
+            jj workspace list --ignore-working-copy --no-pager -R "$jj_root" \
+                -T 'name ++ "\t" ++ root ++ "\t" ++ target.commit_id() ++ "\n"' |
+                while IFS="$(printf '\t')" read -r jj_name jj_path jj_tip; do
+                    [ -n "$jj_name" ] || continue
+                    [ -n "$jj_path" ] || continue
+                    [ -d "$jj_path" ] || continue
+                    canonical=$(cd "$jj_path" 2>/dev/null && pwd -P) || continue
+                    # Keep the primary JJ workspace (the one that owns the
+                    # shared repo store) and never delete the caller's current
+                    # workspace during a real run. Dry-run still classifies it.
+                    [ ! -d "$canonical/.jj/repo" ] || continue
+                    if { [ "$canonical" = "$jj_current_root" ] ||
+                         [ "$canonical" = "$current_git_root" ]; } &&
+                       [ "$dry" -ne 1 ]; then
+                        echo "skip invoking JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+
+                    if git -C "$jj_path" rev-parse --git-dir >/dev/null 2>&1; then
+                        [ -z "$(git -C "$jj_path" status --porcelain --untracked-files=all 2>/dev/null)" ] || {
+                            echo "skip dirty JJ/Git workspace: $jj_path" >&2
+                            continue
+                        }
+                        jj_tip=$(git -C "$jj_path" rev-parse --verify HEAD 2>/dev/null) || continue
+                        git_tip_integrated "$jj_tip" || continue
+                    else
+                        jj_before=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || continue
+                        jj status --no-pager -R "$jj_path" >/dev/null 2>&1 || continue
+                        jj_tip=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || continue
+                        [ "$jj_before" = "$jj_tip" ] || {
+                            echo "skip changed JJ workspace: $jj_path" >&2
+                            continue
+                        }
+                        jj_tip_integrated "$jj_path" "$jj_tip" || continue
+                    fi
+
+                    if [ "$dry" -eq 1 ]; then
+                        echo "would remove JJ workspace: $jj_name ($jj_path)"
+                    else
+                        echo "remove JJ workspace: $jj_name ($jj_path)"
+                        jj --no-pager -R "$jj_root" workspace forget "$jj_name" || continue
+                        rm -rf "$jj_path"
+                    fi
+                done
+        fi
+    fi
+}
+
+f "$@"
