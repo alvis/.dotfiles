@@ -26,7 +26,15 @@ brew install \
   || true
 
 # setup pinentry
-echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.conf
+{
+  echo "pinentry-program $(brew --prefix)/bin/pinentry-mac"
+  # Keep ordinary GPG cache entries at one hour when they are idle.
+  echo "default-cache-ttl 3600"
+  # Bound all cached passphrases, including authorize-sign presets, at one year.
+  echo "max-cache-ttl 31536000"
+  # allow git authorize-sign to seed a cache entry before its timer clears it.
+  echo "allow-preset-passphrase"
+} > ~/.gnupg/gpg-agent.conf
 
 # github extensions
 
@@ -38,4 +46,3 @@ echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.c
 # //
 brew install copilot-cli gh
 gh extension install dlvhdr/gh-dash
-
