@@ -1,0 +1,1534 @@
+#!/bin/sh
+
+# `git sweep` retires development state that no longer needs its own checkout.
+#
+# Structure overview
+# ------------------
+# 1. Refresh remotes and resolve the remote default branch.
+# 2. Define integration predicates for Git and JJ. A tip is disposable when:
+#      - it is an ancestor of the default branch (old default-branch history),
+#      - its net patch is already represented on the default branch, or
+#      - its exact branch name and SHA identify a merged/closed GitHub PR.
+# 3. Query GitHub once and build a validated, same-repository PR-head ledger.
+# 4. Remove eligible plain Git worktrees and prune registrations whose paths
+#    Git marks prunable.
+# 5. Delete local branches whose tips are retained by default-branch history
+#    or by an exact merged-PR branch/SHA match; preserve closed-unmerged PRs.
+# 6. Inventory JJ workspaces and bookmarks, protect every active descendant,
+#    remove eligible clean workspaces, abandon stale stacks, and forget their
+#    local bookmarks without deleting remote branches.
+#
+# Destructive-operation invariants
+# --------------------------------
+# - Dirty, locked, current, primary, malformed, changed, or unverifiable state
+#   is always kept.
+# - Git worktree HEAD and cleanliness are checked again immediately before
+#   removal; moved worktree metadata is repaired only during a real run.
+# - JJ workspace store/name/root/target identity is checked twice.
+# - Closed-PR matching uses both branch name and full commit SHA. A reused
+#   branch, unrelated same-SHA branch, fork PR, or detached HEAD does not match.
+# - Any incomplete GitHub/JJ inventory disables the corresponding cleanup.
+# - `--dry-run` still fetches/prunes remote-tracking refs, but never repairs or
+#   removes local worktrees, local branches, JJ workspaces, or JJ revisions.
+
+f() {
+    # ----------------------------------------------------------------------
+    # Invocation and repository baseline
+    # ----------------------------------------------------------------------
+
+    # Git can export repository-local variables when invoking a subcommand.
+    # They override later `git -C <other-worktree>` calls unless explicitly cleared.
+    for git_local_env in \
+        GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+        GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX \
+        GIT_SHALLOW_FILE; do
+        unset "$git_local_env"
+    done
+
+    usage() {
+        printf '%s\n' \
+            'usage: git sweep [help] [--dry-run]' \
+            '' \
+            '    help                  show this help' \
+            '    --dry-run             dry run' \
+            ''
+    }
+
+    dry=
+    case "${1-}" in
+        help)
+            [ "$#" -eq 1 ] || {
+                usage >&2
+                return 2
+            }
+            usage
+            return
+            ;;
+        --dry-run)
+            dry=1
+            shift
+            ;;
+    esac
+    if [ "$#" -ne 0 ]; then
+        usage >&2
+        return 2
+    fi
+
+    if [ -z "$dry" ]; then
+        case "${SWEEP_DRY_RUN-0}" in
+            1|true|TRUE|yes|YES|on|ON) dry=1 ;;
+            0|false|FALSE|no|NO|off|OFF|'') dry=0 ;;
+            *)
+                echo "git sweep: SWEEP_DRY_RUN must be a boolean" >&2
+                return 2
+                ;;
+        esac
+    fi
+
+    # All integration decisions use freshly pruned remote refs. If fetching
+    # fails, stop rather than classify against stale remote history.
+    git fetch --all --prune || return
+
+    remote=${SWEEP_REMOTE:-origin}
+    remote_url=$(git remote get-url "$remote" 2>/dev/null) || {
+        echo "git sweep: could not resolve URL for remote $remote" >&2
+        return 2
+    }
+    default_ref=$(git symbolic-ref --quiet "refs/remotes/$remote/HEAD" 2>/dev/null) || {
+        echo "git sweep: refs/remotes/$remote/HEAD is not set; run: git remote set-head $remote -a" >&2
+        return 2
+    }
+    default_ref=${default_ref#refs/remotes/}
+    case "$default_ref" in
+        "$remote"/*) default_branch=${default_ref#"$remote"/} ;;
+        *)
+            echo "git sweep: default ref $default_ref does not belong to remote $remote" >&2
+            return 2
+            ;;
+    esac
+    default_tip=$(git rev-parse --verify "$default_ref^{commit}") || return
+
+    echo "default branch: $default_ref"
+
+    # ----------------------------------------------------------------------
+    # Git/JJ integration predicates
+    # ----------------------------------------------------------------------
+
+    # Patch IDs let squash-equivalent content qualify even though the original
+    # commit IDs are absent from the default branch's graph.
+    patch_id_of_diff() {
+        git_patch=$(git diff --no-ext-diff --binary --no-renames "$1" "$2") || {
+            git_integration_check_safe=0
+            return 1
+        }
+        git_patch_id=$(printf '%s\n' "$git_patch" | git patch-id --stable) || {
+            git_integration_check_safe=0
+            return 1
+        }
+        printf '%s\n' "$git_patch_id" | awk 'NR == 1 { print $1; exit }'
+    }
+
+    patch_id_of_commit() {
+        git_patch=$(git show --no-ext-diff --format= --binary --no-renames "$1") || {
+            git_integration_check_safe=0
+            return 1
+        }
+        git_patch_id=$(printf '%s\n' "$git_patch" | git patch-id --stable) || {
+            git_integration_check_safe=0
+            return 1
+        }
+        printf '%s\n' "$git_patch_id" | awk 'NR == 1 { print $1; exit }'
+    }
+
+    # This is the explicit "past history of the default branch" rule. A clean
+    # worktree at any ancestor of the fetched default tip can be retired even
+    # when it never had a PR or its local branch still exists.
+    git_tip_is_default_history() {
+        tip=$1
+        git merge-base --is-ancestor "$tip" "$default_tip"
+        ancestor_status=$?
+        case "$ancestor_status" in
+            0) return 0 ;;
+            1) return 1 ;;
+            *) git_integration_check_safe=0; return 1 ;;
+        esac
+    }
+
+    git_tip_integrated() {
+        tip=$1
+        git_tip_is_default_history "$tip" && return 0
+
+        # A zero net diff covers an empty branch or a branch whose changes were
+        # independently applied to the default branch.
+        base=$(git merge-base "$tip" "$default_tip" 2>/dev/null)
+        merge_base_status=$?
+        case "$merge_base_status" in
+            0) ;;
+            1) return 1 ;;
+            *) git_integration_check_safe=0; return 1 ;;
+        esac
+        git diff --quiet --no-ext-diff "$base" "$tip"
+        diff_status=$?
+        case "$diff_status" in
+            0) return 0 ;;
+            1) ;;
+            *) git_integration_check_safe=0; return 1 ;;
+        esac
+        branch_patch=$(patch_id_of_diff "$base" "$tip") || {
+            git_integration_check_safe=0
+            return 1
+        }
+        [ -n "$branch_patch" ] || return 1
+
+        # Compare the whole branch patch with each first-parent commit. This is
+        # the common squash-merge case where graph ancestry cannot prove reuse.
+        default_commits=$(git log --first-parent --no-merges --format=%H "$default_tip") || {
+            git_integration_check_safe=0
+            return 1
+        }
+        for commit in $default_commits; do
+            commit_patch=$(patch_id_of_commit "$commit") || {
+                git_integration_check_safe=0
+                return 1
+            }
+            [ "$commit_patch" = "$branch_patch" ] && return 0
+        done
+        return 1
+    }
+
+    jj_patch_id_of_diff() {
+        jj_patch=$(jj --no-pager --ignore-working-copy -R "$1" \
+            diff --from "$2" --to "$3" --git) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        jj_patch_id=$(printf '%s\n' "$jj_patch" | git patch-id --stable) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        printf '%s\n' "$jj_patch_id" | awk 'NR == 1 { print $1; exit }'
+    }
+
+    jj_patch_id_of_commit() {
+        jj_patch=$(jj --no-pager --ignore-working-copy -R "$1" show --git -r "$2") || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        jj_patch_id=$(printf '%s\n' "$jj_patch" | git patch-id --stable) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        printf '%s\n' "$jj_patch_id" | awk 'NR == 1 { print $1; exit }'
+    }
+
+    # Use the exact fetched Git default SHA rather than JJ's configurable
+    # `trunk()` alias. This keeps SWEEP_REMOTE and all JJ checks aligned.
+    jj_tip_is_default_history() {
+        jj_repo=$1
+        jj_tip=$2
+
+        # Capture first so a failed JJ query cannot be hidden by a successful
+        # downstream text match in a shell without `pipefail`.
+        jj_history_match=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip & ancestors($default_tip)" -T 'commit_id ++ "\n"' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        printf '%s\n' "$jj_history_match" | grep -qx "$jj_tip"
+    }
+
+    jj_tip_is_undescribed() {
+        jj_repo=$1
+        jj_tip=$2
+
+        jj_description_state=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip" -T 'if(description == "", "yes\n", "no\n")' 2>/dev/null) || return 2
+        [ "$jj_description_state" = yes ] && return 0
+        return 1
+    }
+
+    jj_tip_integrated() {
+        jj_repo=$1
+        jj_tip=$2
+
+        jj_tip_is_default_history "$jj_repo" "$jj_tip" && return 0
+
+        # JJ workspaces commonly end on an undescribed empty working-copy
+        # commit. It is disposable only when every parent is already safe.
+        jj_empty=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip" -T 'if(empty && description == "", "yes\n", "no\n")' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        if [ "$jj_empty" = yes ]; then
+            jj_parents=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+                -r "$jj_tip" -T 'parents.map(|p| p.commit_id() ++ "\n")' 2>/dev/null) || {
+                jj_integration_check_safe=0
+                return 1
+            }
+            [ -n "$jj_parents" ] || return 1
+            for jj_parent in $jj_parents; do
+                jj_tip_integrated "$jj_repo" "$jj_parent" || return 1
+            done
+            return 0
+        fi
+
+        # Fall back to patch equivalence for squash merges that sever ancestry.
+        jj_base_candidates=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "heads(::$jj_tip & ::$default_tip)" -T 'commit_id ++ "\n"' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        jj_base=$(printf '%s\n' "$jj_base_candidates" | head -n 1)
+        [ -n "$jj_base" ] || return 1
+        jj_default=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$default_tip" -T 'commit_id ++ "\n"' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        jj_root_commit=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r 'root()' -T 'commit_id ++ "\n"' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        [ "$jj_default" != "$jj_root_commit" ] || return 1
+
+        branch_patch=$(jj_patch_id_of_diff "$jj_repo" "$jj_base" "$jj_tip") || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        [ -n "$branch_patch" ] || return 1
+        jj_default_commits=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "::$default_tip ~ merges()" -T 'commit_id ++ "\n"' 2>/dev/null) || {
+            jj_integration_check_safe=0
+            return 1
+        }
+        for commit in $jj_default_commits; do
+            commit_patch=$(jj_patch_id_of_commit "$jj_repo" "$commit") || {
+                jj_integration_check_safe=0
+                return 1
+            }
+            [ "$commit_patch" = "$branch_patch" ] && return 0
+        done
+        return 1
+    }
+
+    # ----------------------------------------------------------------------
+    # GitHub PR evidence and JJ protection ledger
+    # ----------------------------------------------------------------------
+
+    load_closed_pr_heads() {
+        # An empty ledger means "no PR-based deletion eligibility". Create it
+        # before querying so every error path naturally fails closed.
+        : > "$closed_pr_heads"
+        : > "$merged_pr_heads"
+
+        if ! command -v gh >/dev/null 2>&1; then
+            echo "skip closed PR cleanup: gh is not installed" >&2
+            return
+        fi
+
+        # Resolve through `gh` instead of parsing Git remote URLs; this supports
+        # SSH remotes and GitHub Enterprise hosts consistently.
+        github_repo=$(gh repo view "$remote_url" --json url \
+            --jq '.url | sub("^https?://"; "")' 2>/dev/null) || {
+            echo "skip closed PR cleanup: could not resolve the GitHub repository" >&2
+            return
+        }
+        [ -n "$github_repo" ] || return
+
+        merged_pr_limit=${SWEEP_MERGED_PR_LIMIT:-1000}
+        case "$merged_pr_limit" in
+            ''|*[!0-9]*)
+                echo "git sweep: SWEEP_MERGED_PR_LIMIT must be a non-negative integer" >&2
+                return
+                ;;
+        esac
+
+        closed_pr_limit=${SWEEP_CLOSED_PR_LIMIT:-1000}
+        case "$closed_pr_limit" in
+            ''|*[!0-9]*)
+                echo "git sweep: SWEEP_CLOSED_PR_LIMIT must be a non-negative integer" >&2
+                return
+                ;;
+        esac
+
+        # Merged and closed-without-merge are queried separately because `gh`
+        # exposes them as distinct states. Their independent limits preserve
+        # the original merged-PR configuration contract.
+        merged_pr_heads_raw=$sweep_tmp_dir/merged-pr-heads.raw
+        closed_only_pr_heads_raw=$sweep_tmp_dir/closed-only-pr-heads.raw
+        : > "$merged_pr_heads_raw"
+        : > "$closed_only_pr_heads_raw"
+
+        if [ "$merged_pr_limit" -ne 0 ]; then
+            if ! gh pr list --repo "$github_repo" --state merged \
+                --limit "$merged_pr_limit" \
+                --json headRefName,headRefOid,isCrossRepository \
+                --jq '.[] | select(.isCrossRepository == false) | [.headRefName, .headRefOid] | @tsv' \
+                > "$merged_pr_heads_raw"; then
+                echo "skip closed PR cleanup: GitHub query failed for merged PRs" >&2
+                : > "$closed_pr_heads"
+                : > "$merged_pr_heads"
+                return
+            fi
+        fi
+        if [ "$closed_pr_limit" -ne 0 ]; then
+            if ! gh pr list --repo "$github_repo" --state closed \
+                --limit "$closed_pr_limit" \
+                --json headRefName,headRefOid,isCrossRepository \
+                --jq '.[] | select(.isCrossRepository == false) | [.headRefName, .headRefOid] | @tsv' \
+                > "$closed_only_pr_heads_raw"; then
+                echo "skip closed PR cleanup: GitHub query failed for closed PRs" >&2
+                : > "$closed_pr_heads"
+                : > "$merged_pr_heads"
+                return
+            fi
+        fi
+
+        # Reject malformed records and normalize SHAs in staging files. Every
+        # producer is checked before either final ledger becomes deletion
+        # evidence, so a partial awk/sort result can never authorize cleanup.
+        merged_pr_heads_normalized=$sweep_tmp_dir/merged-pr-heads.normalized
+        merged_pr_heads_staged=$sweep_tmp_dir/merged-pr-heads.staged
+        closed_pr_heads_combined=$sweep_tmp_dir/closed-pr-heads.combined
+        closed_pr_heads_normalized=$sweep_tmp_dir/closed-pr-heads.normalized
+        closed_pr_heads_staged=$sweep_tmp_dir/closed-pr-heads.staged
+
+        if ! awk -F '	' '
+            NF == 2 && length($2) == 40 && $2 ~ /^[0-9a-fA-F]+$/ {
+                print $1 "\t" tolower($2)
+            }
+        ' "$merged_pr_heads_raw" > "$merged_pr_heads_normalized" ||
+           ! LC_ALL=C sort -u "$merged_pr_heads_normalized" > "$merged_pr_heads_staged" ||
+           ! cat "$merged_pr_heads_raw" "$closed_only_pr_heads_raw" > "$closed_pr_heads_combined" ||
+           ! awk -F '	' '
+            NF == 2 && length($2) == 40 && $2 ~ /^[0-9a-fA-F]+$/ {
+                print $1 "\t" tolower($2)
+            }
+        ' "$closed_pr_heads_combined" > "$closed_pr_heads_normalized" ||
+           ! LC_ALL=C sort -u "$closed_pr_heads_normalized" > "$closed_pr_heads_staged"; then
+            echo "skip closed PR cleanup: could not validate GitHub results" >&2
+            : > "$closed_pr_heads"
+            : > "$merged_pr_heads"
+            return
+        fi
+
+        # Renames within one temporary directory publish only complete files.
+        if ! mv "$merged_pr_heads_staged" "$merged_pr_heads" ||
+           ! mv "$closed_pr_heads_staged" "$closed_pr_heads"; then
+            echo "skip closed PR cleanup: could not publish GitHub results" >&2
+            : > "$closed_pr_heads"
+            : > "$merged_pr_heads"
+            return
+        fi
+    }
+
+    find_closed_jj_bookmarks() {
+        # JJ stacks require a stronger match than plain Git worktrees: both the
+        # local bookmark name and its exact commit must match the PR ledger.
+        : > "$closed_jj_bookmarks"
+        [ -s "$closed_pr_heads" ] || return
+
+        jj_bookmarks=$sweep_tmp_dir/jj-bookmarks
+        if ! jj --no-pager --ignore-working-copy -R "$jj_root" bookmark list \
+            -T 'if(!remote && !conflict && present, name ++ "\t" ++ normal_target.commit_id() ++ "\n")' \
+            > "$jj_bookmarks"; then
+            echo "skip closed PR cleanup: could not list JJ bookmarks" >&2
+            closed_cleanup_safe=0
+            return
+        fi
+
+        # Inventory every local and remote bookmark before selecting anything
+        # to abandon. Any unmatched reference may represent continuing work.
+        jj_protection_bookmarks=$sweep_tmp_dir/jj-protection-bookmarks
+        if ! jj --no-pager --ignore-working-copy -R "$jj_root" bookmark list --all-remotes \
+            -T 'if(present && !conflict, name ++ if(remote, "@" ++ remote, "") ++ "\t" ++ normal_target.commit_id() ++ "\n")' \
+            > "$jj_protection_bookmarks"; then
+            echo "skip closed PR cleanup: could not inventory JJ bookmark targets" >&2
+            closed_cleanup_safe=0
+            return
+        fi
+
+        # Conflicted bookmarks have no single trustworthy target, so abandon
+        # nothing until the user resolves them.
+        jj_conflicted_bookmarks=$(jj --no-pager --ignore-working-copy -R "$jj_root" bookmark list \
+            --conflicted -T '"conflict\n"' 2>/dev/null) || {
+            echo "skip closed PR cleanup: could not inspect conflicted JJ bookmarks" >&2
+            closed_cleanup_safe=0
+            return
+        }
+        if [ -n "$jj_conflicted_bookmarks" ]; then
+            echo "skip closed PR cleanup: resolve conflicted JJ bookmarks first" >&2
+            closed_cleanup_safe=0
+            return
+        fi
+
+        if ! awk -F '	' '
+            NR == FNR {
+                closed[$1 "\t" tolower($2)] = 1
+                next
+            }
+            closed[$1 "\t" tolower($2)] {
+                print $1 "\t" tolower($2)
+            }
+        ' "$closed_pr_heads" "$jj_bookmarks" > "$closed_jj_bookmarks"; then
+            echo "skip closed PR cleanup: could not record matched JJ bookmarks" >&2
+            closed_cleanup_safe=0
+        fi
+    }
+
+    # The protected-head file is an append-only set of closed PR stack roots
+    # that still have an active descendant, workspace, or bookmark.
+    protect_closed_head() {
+        protected_head=$1
+        if grep -Fqx "$protected_head" "$protected_jj_heads" 2>/dev/null; then
+            return
+        else
+            protected_status=$?
+        fi
+        if [ "$protected_status" -ne 1 ]; then
+            closed_cleanup_safe=0
+            return 1
+        fi
+        if ! printf '%s\n' "$protected_head" >> "$protected_jj_heads"; then
+            closed_cleanup_safe=0
+            return 1
+        fi
+    }
+
+    closed_head_is_protected() {
+        protected_head=$1
+        if grep -Fqx "$protected_head" "$protected_jj_heads" 2>/dev/null; then
+            return 0
+        else
+            protected_status=$?
+        fi
+        if [ "$protected_status" -eq 1 ]; then
+            return 1
+        fi
+        closed_cleanup_safe=0
+        return 2
+    }
+
+    protect_closed_heads_for_tip() {
+        jj_repo=$1
+        jj_tip=$2
+
+        # No matched closed bookmarks means there is nothing to protect, not
+        # an inventory failure.
+        [ -s "$closed_jj_bookmarks" ] || return 0
+        while IFS="$(printf '\t')" read -r closed_name closed_head; do
+            [ -n "$closed_name" ] || continue
+            # Protect the closed stack when this retained tip is anywhere in
+            # its descendant chain above the fetched default commit.
+            jj_relation=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+                -r "$jj_tip & descendants($default_tip..$closed_head)" \
+                -T 'commit_id ++ "\n"' 2>/dev/null) || {
+                closed_cleanup_safe=0
+                return 1
+            }
+            [ -z "$jj_relation" ] || protect_closed_head "$closed_head"
+        done < "$closed_jj_bookmarks"
+    }
+
+    jj_tip_matches_closed_workspace_shape() {
+        jj_repo=$1
+        jj_tip=$2
+        closed_head=$3
+
+        [ "$jj_tip" = "$closed_head" ] && return 0
+        jj_disposable=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
+            -r "$jj_tip & children($closed_head)" \
+            -T 'if(empty && description == "", "yes\n", "no\n")' 2>/dev/null) || {
+            closed_cleanup_safe=0
+            return 1
+        }
+        [ "$jj_disposable" = yes ]
+    }
+
+    jj_tip_is_disposable_closed_workspace() {
+        jj_repo=$1
+        jj_tip=$2
+
+        [ "$closed_cleanup_safe" -eq 1 ] || return 1
+        [ -s "$closed_jj_bookmarks" ] || return 1
+        while IFS="$(printf '\t')" read -r closed_name closed_head; do
+            [ -n "$closed_name" ] || continue
+            if closed_head_is_protected "$closed_head"; then
+                continue
+            else
+                protected_status=$?
+            fi
+            [ "$protected_status" -eq 1 ] || return 1
+            # A workspace may point directly at the PR head or at JJ's usual
+            # empty, undescribed child working-copy commit.
+            jj_tip_matches_closed_workspace_shape "$jj_repo" "$jj_tip" "$closed_head" && return 0
+            [ "$closed_cleanup_safe" -eq 1 ] || return 1
+        done < "$closed_jj_bookmarks"
+        return 1
+    }
+
+    protect_stacks_with_active_bookmarks() {
+        [ -s "$closed_jj_bookmarks" ] || return
+
+        while IFS="$(printf '\t')" read -r active_name active_head; do
+            [ -n "$active_name" ] || continue
+            active_record=$(printf '%s\t%s' "$active_name" "$active_head")
+            if grep -Fqx "$active_record" "$closed_jj_bookmarks" 2>/dev/null; then
+                continue
+            else
+                active_status=$?
+            fi
+            if [ "$active_status" -ne 1 ]; then
+                closed_cleanup_safe=0
+                return
+            fi
+
+            # `name@remote` mirrors the exact local PR bookmark. Do not treat
+            # an exact same-name/SHA mirror as a distinct active descendant.
+            case "$active_name" in
+                *@*)
+                    active_local_name=${active_name%@*}
+                    active_local_record=$(printf '%s\t%s' "$active_local_name" "$active_head")
+                    if grep -Fqx "$active_local_record" "$closed_jj_bookmarks" 2>/dev/null; then
+                        continue
+                    else
+                        active_status=$?
+                    fi
+                    if [ "$active_status" -ne 1 ]; then
+                        closed_cleanup_safe=0
+                        return
+                    fi
+                    ;;
+            esac
+
+            while IFS="$(printf '\t')" read -r closed_name closed_head; do
+                [ -n "$closed_name" ] || continue
+                jj_relation=$(jj --no-pager --ignore-working-copy -R "$jj_root" log --no-graph \
+                    -r "$active_head & descendants($default_tip..$closed_head)" \
+                    -T 'commit_id ++ "\n"' 2>/dev/null) || {
+                    closed_cleanup_safe=0
+                    return
+                }
+                [ -z "$jj_relation" ] || protect_closed_head "$closed_head"
+            done < "$closed_jj_bookmarks"
+        done < "$jj_protection_bookmarks"
+    }
+
+    cleanup_closed_jj_stacks() {
+        [ -s "$closed_jj_bookmarks" ] || return
+
+        if [ "$closed_cleanup_safe" -ne 1 ]; then
+            echo "skip closed PR cleanup: could not verify active JJ references" >&2
+            return
+        fi
+
+        # Build the complete abandon list before mutating JJ. This prevents a
+        # partial scan from deleting only a subset of an interdependent stack.
+        abandonable_jj_bookmarks=$sweep_tmp_dir/abandonable-jj-bookmarks
+        : > "$abandonable_jj_bookmarks"
+        while IFS="$(printf '\t')" read -r closed_name closed_head; do
+            [ -n "$closed_name" ] || continue
+            if closed_head_is_protected "$closed_head"; then
+                echo "keep closed PR stack with active descendants: $closed_name ($closed_head)" >&2
+            else
+                protected_status=$?
+                if [ "$protected_status" -ne 1 ]; then
+                    echo "skip closed PR cleanup: could not read JJ protection state" >&2
+                    return
+                fi
+                if ! printf '%s\t%s\n' "$closed_name" "$closed_head" >> "$abandonable_jj_bookmarks"; then
+                    echo "skip closed PR cleanup: could not record abandonable JJ stacks" >&2
+                    closed_cleanup_safe=0
+                    return
+                fi
+            fi
+        done < "$closed_jj_bookmarks"
+
+        if [ ! -s "$abandonable_jj_bookmarks" ]; then
+            return
+        fi
+
+        if [ "$dry" -eq 1 ]; then
+            while IFS="$(printf '\t')" read -r closed_name closed_head; do
+                [ -n "$closed_name" ] || continue
+                echo "would abandon closed PR stack: $closed_name ($closed_head)"
+            done < "$abandonable_jj_bookmarks"
+            while IFS="$(printf '\t')" read -r closed_name closed_head; do
+                [ -n "$closed_name" ] || continue
+                echo "would forget closed PR bookmark: $closed_name"
+            done < "$abandonable_jj_bookmarks"
+            return
+        fi
+
+        set --
+        while IFS="$(printf '\t')" read -r closed_name closed_head; do
+            [ -n "$closed_name" ] || continue
+            set -- "$@" "$default_tip..$closed_head"
+        done < "$abandonable_jj_bookmarks"
+
+        echo "abandon closed PR stacks"
+        # A pushed PR head can remain immutable while its remote branch
+        # still exists. Exact GitHub matches and the active-reference
+        # checks above scope this override to stale revisions.
+        if ! jj --no-pager --ignore-immutable -R "$jj_root" abandon \
+            --retain-bookmarks "$@"; then
+            echo "could not abandon closed PR stacks; bookmarks were kept" >&2
+            return
+        fi
+
+        # Forget is deliberately local-only. Unlike bookmark deletion followed
+        # by push, it does not ask GitHub to delete a remote branch.
+        set --
+        while IFS="$(printf '\t')" read -r closed_name closed_head; do
+            [ -n "$closed_name" ] || continue
+            set -- "$@" "$closed_name"
+        done < "$abandonable_jj_bookmarks"
+
+        echo "forget closed PR bookmarks: $*"
+        jj --no-pager --ignore-working-copy -R "$jj_root" bookmark forget -- "$@" ||
+            echo "could not forget one or more closed PR bookmarks" >&2
+    }
+
+    # ----------------------------------------------------------------------
+    # Workspace identity and moved-worktree recovery helpers
+    # ----------------------------------------------------------------------
+
+    cleanup_sweep_tmp() {
+        if [ -n "${sweep_tmp_dir-}" ] && [ -d "$sweep_tmp_dir" ]; then
+            rm -rf -- "$sweep_tmp_dir"
+        fi
+    }
+
+    resolve_jj_store() {
+        workspace_root=$1
+        repo_marker=$workspace_root/.jj/repo
+
+        # The primary workspace owns a directory; secondary workspaces contain
+        # a one-line pointer. Canonicalize either form before comparison.
+        if [ -d "$repo_marker" ]; then
+            (cd "$repo_marker" 2>/dev/null && pwd -P)
+            return
+        fi
+        [ -f "$repo_marker" ] || return 1
+        [ "$(awk 'END { print NR }' "$repo_marker" 2>/dev/null)" = 1 ] || return 1
+        repo_pointer=
+        IFS= read -r repo_pointer < "$repo_marker" || [ -n "$repo_pointer" ] || return 1
+        [ -n "$repo_pointer" ] || return 1
+        case "$repo_pointer" in
+            /*) (cd "$repo_pointer" 2>/dev/null && pwd -P) ;;
+            *) (cd "$workspace_root/.jj/$repo_pointer" 2>/dev/null && pwd -P) ;;
+        esac
+    }
+
+    verify_jj_workspace_identity() {
+        workspace_root=$1
+        workspace_name=$2
+        workspace_tip=$3
+
+        # Store equality prevents a path from being replaced with a workspace
+        # from another repository between inventory and removal.
+        live_store=$(resolve_jj_store "$workspace_root") || return 1
+        [ "$live_store" = "$jj_expected_store" ] || return 1
+        live_workspace_inventory=$(jj workspace list --ignore-working-copy --no-pager -R "$workspace_root" \
+            -T '"{\"name\":" ++ stringify(name).escape_json() ++ ",\"target\":" ++ stringify(target.commit_id()).escape_json() ++ ",\"root\":" ++ json(root) ++ "}\n"' \
+            2>/dev/null) || return 1
+        # Require exactly one live registration with the inventoried name,
+        # commit, and canonical root. This is also rerun immediately pre-delete.
+        printf '%s\n' "$live_workspace_inventory" |
+            jq -e -s --arg name "$workspace_name" --arg target "$workspace_tip" \
+                --arg root "$workspace_root" '
+                    [.[] | select(
+                        .name == $name and
+                        .target == $target and
+                        .root == $root
+                    )] | length == 1
+                ' >/dev/null
+    }
+
+    verify_jj_workspace_clean_and_unchanged() {
+        workspace_root=$1
+        workspace_tip=$2
+        workspace_is_git=$3
+        workspace_git_head=$4
+
+        if [ "$workspace_is_git" -eq 1 ]; then
+            # Git-backed workspaces must retain both identities: Git HEAD and
+            # JJ `@`. A clean Git index/worktree is required at this instant.
+            live_git_head=$(git -C "$workspace_root" rev-parse --verify HEAD 2>/dev/null) || return 1
+            [ "$live_git_head" = "$workspace_git_head" ] || return 1
+            live_git_status=$(git -C "$workspace_root" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+            [ -z "$live_git_status" ] || return 1
+            live_jj_tip=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
+                -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
+            [ "$live_jj_tip" = "$workspace_tip" ] || return 1
+            jj_tip_is_undescribed "$workspace_root" "$workspace_tip"
+            return
+        fi
+
+        # Native JJ dirtiness is observed by snapshotting. If any file changed,
+        # the working-copy commit ID changes and the equality check fails.
+        live_jj_before=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
+            -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
+        [ "$live_jj_before" = "$workspace_tip" ] || return 1
+        jj status --no-pager -R "$workspace_root" >/dev/null 2>&1 || return 1
+        live_jj_after=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
+            -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
+        [ "$live_jj_after" = "$workspace_tip" ] || return 1
+        jj_tip_is_undescribed "$workspace_root" "$workspace_tip"
+    }
+
+    # Resolve the shared Git metadata once. Linked worktrees may have stale
+    # `.git` pointers after the main checkout moves, but their registration in
+    # this current common directory can still be used for read-only inspection.
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return
+    case "$git_common_dir" in
+        /*) ;;
+        *) git_common_dir=$(cd "$git_common_dir" 2>/dev/null && pwd -P) || return ;;
+    esac
+
+    registered_git_dir_for_worktree() {
+        registered_worktree=$1
+        [ -d "$git_common_dir/worktrees" ] || return 1
+        expected_git_file=$registered_worktree/.git
+
+        # Match by the registration's `gitdir` backlink rather than guessing
+        # its directory name from the worktree basename.
+        for registered_git_dir in "$git_common_dir"/worktrees/*; do
+            [ -d "$registered_git_dir" ] || continue
+            [ -f "$registered_git_dir/gitdir" ] || continue
+            registered_git_file=
+            IFS= read -r registered_git_file < "$registered_git_dir/gitdir" ||
+                [ -n "$registered_git_file" ] || continue
+            case "$registered_git_file" in
+                /*) ;;
+                *) registered_git_file=$registered_git_dir/$registered_git_file ;;
+            esac
+            registered_git_parent=${registered_git_file%/*}
+            registered_git_name=${registered_git_file##*/}
+            registered_git_parent=$(cd "$registered_git_parent" 2>/dev/null && pwd -P) || continue
+            registered_git_file=$registered_git_parent/$registered_git_name
+            if [ "$registered_git_file" = "$expected_git_file" ]; then
+                printf '%s\n' "$registered_git_dir"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    inspect_git_worktree() {
+        inspected_worktree=$1
+        inspected_head=
+        inspected_status=
+        worktree_needs_repair=0
+
+        # Normal worktrees use their own `.git` pointer. This is the common and
+        # preferred path because Git validates the complete linkage for us.
+        if inspected_head=$(git -C "$inspected_worktree" rev-parse --verify HEAD 2>/dev/null) &&
+           inspected_status=$(git -C "$inspected_worktree" status --porcelain --untracked-files=all 2>/dev/null); then
+            return 0
+        fi
+
+        # If the pointer is stale, inspect through the current registration.
+        # No metadata is repaired here, keeping dry-run strictly read-only.
+        registered_git_dir=$(registered_git_dir_for_worktree "$inspected_worktree") || return 1
+        inspected_head=$(git --git-dir="$registered_git_dir" --work-tree="$inspected_worktree" \
+            rev-parse --verify HEAD 2>/dev/null) || return 1
+        inspected_status=$(git --git-dir="$registered_git_dir" --work-tree="$inspected_worktree" \
+            status --porcelain --untracked-files=all 2>/dev/null) || return 1
+        worktree_needs_repair=1
+    }
+
+    # The temporary ledger is shared by Git and JJ cleanup so both make their
+    # PR decisions from one immutable snapshot during this run.
+    sweep_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/git-sweep.XXXXXX") || {
+        echo "skip closed PR cleanup: could not create temporary directory" >&2
+        sweep_tmp_dir=
+    }
+    if [ -n "$sweep_tmp_dir" ]; then
+        trap cleanup_sweep_tmp 0
+        closed_pr_heads=$sweep_tmp_dir/closed-pr-heads
+        merged_pr_heads=$sweep_tmp_dir/merged-pr-heads
+        removable_git_worktree_branches=$sweep_tmp_dir/removable-git-worktree-branches
+        unsafe_git_worktree_paths=$sweep_tmp_dir/unsafe-git-worktree-paths
+        : > "$removable_git_worktree_branches" || removable_git_worktree_branches=
+        : > "$unsafe_git_worktree_paths" || unsafe_git_worktree_paths=
+        load_closed_pr_heads
+    fi
+
+    # Canonical roots are used for identity checks; display paths remain as Git
+    # reported them so output corresponds to `git worktree list`.
+    current_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    current_git_root=$(cd "$current_git_root" 2>/dev/null && pwd -P || true)
+
+    first=1
+    wt=
+    head=
+    worktree_branch=
+    locked=0
+    prunable=0
+    quoted_worktree_path=0
+
+    git_head_is_closed_pr() {
+        candidate_branch=$1
+        candidate_head=$2
+        # A detached worktree has no branch and can never qualify solely from
+        # GitHub evidence. Branch reuse is rejected by the additional SHA test.
+        [ -n "$candidate_branch" ] || return 1
+        [ -n "${closed_pr_heads-}" ] && [ -r "$closed_pr_heads" ] || return 1
+        awk -F '\t' -v branch="$candidate_branch" -v candidate="$candidate_head" '
+            $1 == branch && tolower($2) == tolower(candidate) {
+                found = 1
+                exit
+            }
+            END { exit(found ? 0 : 1) }
+        ' "$closed_pr_heads"
+    }
+
+    git_head_is_merged_pr() {
+        candidate_branch=$1
+        candidate_head=$2
+        [ -n "$candidate_branch" ] || return 1
+        [ -n "${merged_pr_heads-}" ] && [ -r "$merged_pr_heads" ] || return 1
+        awk -F '\t' -v branch="$candidate_branch" -v candidate="$candidate_head" '
+            $1 == branch && tolower($2) == tolower(candidate) {
+                found = 1
+                exit
+            }
+            END { exit(found ? 0 : 1) }
+        ' "$merged_pr_heads"
+    }
+
+    # ----------------------------------------------------------------------
+    # Plain Git worktree and gone-branch cleanup
+    # ----------------------------------------------------------------------
+
+    process_git_worktree() {
+        [ -n "$wt" ] || return
+        # A literal tab cannot be represented safely in the tab-delimited
+        # ledgers below. Newlines already delimit this non-`-z` porcelain
+        # stream, while C-quoted paths are caught by the parser itself.
+        case "$wt" in
+            *"$(printf '\t')"*) quoted_worktree_path=1 ;;
+        esac
+        # Git lists the primary worktree first. It anchors the shared metadata
+        # and is intentionally never removed by this command.
+        if [ "$first" -eq 1 ]; then
+            first=0
+            return
+        fi
+        if [ "$locked" -eq 1 ]; then
+            echo "skip locked worktree: $wt" >&2
+            return
+        fi
+        if [ "$quoted_worktree_path" -eq 1 ]; then
+            # Newline-delimited porcelain C-quotes unusual paths. This parser
+            # deliberately refuses to decode them; record the ambiguity so the
+            # global prune pass is disabled as well.
+            if [ -n "${unsafe_git_worktree_paths-}" ]; then
+                printf '%s\n' "$wt" >> "$unsafe_git_worktree_paths" || true
+            fi
+            echo "skip unsafe worktree path: $wt" >&2
+            return
+        fi
+        if [ "$prunable" -eq 1 ]; then
+            # The worktree path is already gone or its administrative backlink
+            # is invalid. Git's native prune command removes metadata only.
+            if [ -n "$worktree_branch" ] &&
+               [ -n "${removable_git_worktree_branches-}" ]; then
+                printf '%s\t%s\n' "$worktree_branch" "$head" \
+                    >> "$removable_git_worktree_branches" || true
+            fi
+            if [ "$dry" -eq 1 ]; then
+                echo "would prune stale worktree registration: $wt"
+            fi
+            return
+        fi
+        [ -d "$wt" ] || return
+        canonical=$(cd "$wt" 2>/dev/null && pwd -P) || return
+        # Colocated JJ workspaces need JJ identity/reference checks below. Do
+        # not let the simpler Git path bypass those protections.
+        if [ -e "$canonical/.jj" ]; then
+            echo "defer JJ-backed Git worktree: $wt" >&2
+            return
+        fi
+        if [ "$canonical" = "$current_git_root" ]; then
+            echo "skip invoking worktree: $wt" >&2
+            return
+        fi
+        # Classify only a readable, unchanged, fully clean worktree. Untracked
+        # files count as dirty because removing the directory would lose them.
+        if ! inspect_git_worktree "$canonical"; then
+            echo "skip unreadable worktree: $wt" >&2
+            return
+        fi
+        if [ "$inspected_head" != "$head" ]; then
+            echo "skip changed worktree: $wt" >&2
+            return
+        fi
+        [ -z "$inspected_status" ] || {
+            echo "skip dirty worktree: $wt" >&2
+            return
+        }
+        # Eligibility is independent of branch tracking state. In particular,
+        # a clean HEAD anywhere in old default-branch history qualifies here.
+        git_tip_integrated "$head" ||
+            git_head_is_closed_pr "$worktree_branch" "$head" || return
+        if [ -n "$worktree_branch" ] &&
+           [ -n "${removable_git_worktree_branches-}" ]; then
+            printf '%s\t%s\n' "$worktree_branch" "$head" \
+                >> "$removable_git_worktree_branches" || true
+        fi
+        if [ "$dry" -eq 1 ]; then
+            echo "would remove worktree: $wt"
+        else
+            # Re-read HEAD and status to close the race between classification
+            # and deletion. Any concurrent checkout or edit cancels removal.
+            if ! inspect_git_worktree "$canonical"; then
+                echo "skip unreadable worktree before removal: $wt" >&2
+                return
+            fi
+            if [ "$inspected_head" != "$head" ] || [ -n "$inspected_status" ]; then
+                echo "skip changed worktree before removal: $wt" >&2
+                return
+            fi
+            # A moved main repository can leave a valid registered worktree
+            # with a stale `.git` file. Repair only during a real run, then
+            # inspect once more through the repaired pointer before deleting.
+            if [ "$worktree_needs_repair" -eq 1 ]; then
+                echo "repair worktree metadata: $wt"
+                if ! git worktree repair "$wt" >/dev/null 2>&1 ||
+                   ! inspect_git_worktree "$canonical" ||
+                   [ "$worktree_needs_repair" -ne 0 ] ||
+                   [ "$inspected_head" != "$head" ] ||
+                   [ -n "$inspected_status" ]; then
+                    echo "skip worktree that could not be safely repaired: $wt" >&2
+                    return
+                fi
+            fi
+            echo "remove worktree: $wt"
+            git worktree remove "$wt" || echo "could not remove worktree: $wt" >&2
+        fi
+    }
+
+    # Porcelain records are blank-line delimited. Processing one record at a
+    # time avoids human-oriented output; unusual paths that Git C-quotes (or
+    # that contain ledger delimiters) are detected and skipped fail-closed.
+    git worktree list --porcelain |
+    {
+        while IFS= read -r line; do
+            if [ -z "$line" ]; then
+                process_git_worktree
+                wt=
+                head=
+                worktree_branch=
+                locked=0
+                prunable=0
+                quoted_worktree_path=0
+            else
+                case "$line" in
+                    worktree\ \"*)
+                        wt=${line#worktree }
+                        quoted_worktree_path=1
+                        ;;
+                    worktree\ *) wt=${line#worktree } ;;
+                    HEAD\ *) head=${line#HEAD } ;;
+                    branch\ refs/heads/*) worktree_branch=${line#branch refs/heads/} ;;
+                    locked|locked\ *) locked=1 ;;
+                    prunable|prunable\ *) prunable=1 ;;
+                esac
+            fi
+        done
+        process_git_worktree
+    }
+
+    # `git worktree prune` removes only stale administrative records; it does
+    # not delete a live worktree directory. `--expire now` includes every entry
+    # already classified as prunable instead of waiting for Git's age grace.
+    if [ "$dry" -ne 1 ] &&
+       [ -n "${unsafe_git_worktree_paths-}" ] &&
+       [ ! -s "$unsafe_git_worktree_paths" ]; then
+        git worktree prune --verbose --expire now ||
+            echo "could not prune one or more stale worktree registrations" >&2
+    elif [ "$dry" -ne 1 ]; then
+        echo "skip stale worktree pruning: worktree path inventory was unsafe" >&2
+    fi
+
+    # Worktree removal/pruning happens first, then every local branch is
+    # considered. The PR rule here is intentionally narrower than workspace
+    # cleanup: merged PRs qualify, but closed-without-merge PRs do not. A gone
+    # upstream alone is not deletion evidence.
+    local_branch_inventory=
+    branch_worktree_inventory=
+    if [ -n "${sweep_tmp_dir-}" ]; then
+        local_branch_inventory=$sweep_tmp_dir/local-branches
+        branch_worktree_inventory=$sweep_tmp_dir/branch-worktrees
+    fi
+
+    # Return a checked-out path, no output when absent, or status 2 when Git
+    # could not provide a complete inventory. Callers must treat status 2 as
+    # "keep" rather than mistaking missing evidence for an unused branch.
+    checked_out_branch_path() {
+        checked_branch=$1
+        [ -n "$branch_worktree_inventory" ] || return 2
+        git worktree list --porcelain > "$branch_worktree_inventory" || return 2
+        awk -v target="branch refs/heads/$checked_branch" '
+            /^worktree / { path = substr($0, 10) }
+            $0 == target { print path; exit }
+        ' "$branch_worktree_inventory" || return 2
+    }
+
+    # Capture the full ref list before entering the destructive pass. A failed
+    # producer therefore results in zero branch deletions, never a partial run.
+    if [ -z "$local_branch_inventory" ] ||
+       ! git for-each-ref --format='%(refname:short)%09%(objectname)' \
+           refs/heads/ > "$local_branch_inventory"; then
+        echo "skip local branch cleanup: could not inventory every branch" >&2
+    else
+        while IFS="$(printf '\t')" read -r local_branch local_head; do
+            [ -n "$local_branch" ] || continue
+
+            # Never delete the local counterpart of the fetched default branch,
+            # even though its tip is trivially part of default-branch history.
+            [ "$local_branch" != "$default_branch" ] || continue
+
+            git_integration_check_safe=1
+            branch_is_default_history=0
+            git_tip_is_default_history "$local_head" && branch_is_default_history=1
+            if [ "$git_integration_check_safe" -ne 1 ]; then
+                echo "skip branch with unverifiable history: $local_branch" >&2
+                continue
+            fi
+            if [ "$branch_is_default_history" -ne 1 ] &&
+               ! git_head_is_merged_pr "$local_branch" "$local_head"; then
+                continue
+            fi
+
+            checked_out_path=$(checked_out_branch_path "$local_branch")
+            checked_out_status=$?
+            if [ "$checked_out_status" -ne 0 ]; then
+                echo "skip branch with unverifiable worktree ownership: $local_branch" >&2
+                continue
+            fi
+            if [ -n "$checked_out_path" ]; then
+                if [ "$dry" -eq 1 ] &&
+                   [ -n "${removable_git_worktree_branches-}" ] &&
+                   grep -Fqx "$(printf '%s\t%s' "$local_branch" "$local_head")" \
+                       "$removable_git_worktree_branches" 2>/dev/null; then
+                    echo "would delete merged/history branch after worktree cleanup: $local_branch"
+                else
+                    echo "keep checked-out merged/history branch: $local_branch ($checked_out_path)" >&2
+                fi
+                continue
+            fi
+
+            if [ "$dry" -eq 1 ]; then
+                echo "would delete merged/history branch: $local_branch"
+            else
+                # Recheck both ownership and tip immediately before deletion.
+                # The final `git branch -D` is intentional: unlike update-ref,
+                # it retains Git's native refusal to delete a branch checked
+                # out by a worktree if a concurrent checkout wins this race.
+                checked_out_path=$(checked_out_branch_path "$local_branch")
+                checked_out_status=$?
+                if [ "$checked_out_status" -ne 0 ]; then
+                    echo "skip branch with newly unverifiable worktree ownership: $local_branch" >&2
+                    continue
+                fi
+                [ -z "$checked_out_path" ] || {
+                    echo "skip newly checked-out branch before deletion: $local_branch" >&2
+                    continue
+                }
+                live_local_head=$(git rev-parse --verify "refs/heads/$local_branch^{commit}" 2>/dev/null) || {
+                    echo "skip branch that disappeared before deletion: $local_branch" >&2
+                    continue
+                }
+                [ "$live_local_head" = "$local_head" ] || {
+                    echo "skip branch that moved before deletion: $local_branch" >&2
+                    continue
+                }
+                echo "delete merged/history branch: $local_branch"
+                git branch -D -- "$local_branch" ||
+                    echo "could not delete merged/history branch: $local_branch" >&2
+            fi
+        done < "$local_branch_inventory"
+    fi
+
+    # ----------------------------------------------------------------------
+    # JJ workspace, stack, and bookmark cleanup
+    # ----------------------------------------------------------------------
+
+    if command -v jj >/dev/null 2>&1; then
+        jj_root=$(jj root 2>/dev/null || true)
+        if [ -n "$jj_root" ]; then
+            # Every removable workspace must resolve back to this exact shared
+            # store. If the store cannot be established, skip all JJ removal.
+            jj_expected_store=$(resolve_jj_store "$jj_root") || {
+                echo "skip JJ cleanup: could not resolve the shared repository store" >&2
+                jj_expected_store=
+            }
+            # Match PR bookmarks and pre-protect stacks that have active local
+            # or remote descendants before examining workspaces.
+            if [ -n "$sweep_tmp_dir" ]; then
+                closed_jj_bookmarks=$sweep_tmp_dir/closed-jj-bookmarks
+                protected_jj_heads=$sweep_tmp_dir/protected-jj-heads
+                closed_cleanup_safe=1
+                if ! : > "$protected_jj_heads"; then
+                    closed_cleanup_safe=0
+                fi
+                find_closed_jj_bookmarks
+                protect_stacks_with_active_bookmarks
+            fi
+
+            jj_current_root=$(cd "$jj_root" 2>/dev/null && pwd -P || true)
+            # JJ template output is emitted as one JSON object per workspace.
+            # jq validates types, uniqueness, SHA shape, and unsafe delimiters
+            # before any path from that inventory is trusted.
+            workspace_inventory_ok=0
+            if [ -n "${sweep_tmp_dir-}" ] && [ -n "$jj_expected_store" ]; then
+                jj_workspaces=$sweep_tmp_dir/jj-workspaces
+                if ! command -v jq >/dev/null 2>&1; then
+                    echo "skip JJ cleanup: jq is required for safe workspace parsing" >&2
+                elif jj workspace list --ignore-working-copy --no-pager -R "$jj_root" \
+                    -T '"{\"name\":" ++ stringify(name).escape_json() ++ ",\"target\":" ++ stringify(target.commit_id()).escape_json() ++ ",\"root\":" ++ json(root) ++ "}\n"' \
+                    > "$jj_workspaces" &&
+                    jq -e -s '
+                        length > 0 and
+                        ([.[].name] | length) == ([.[].name] | unique | length) and
+                        all(.[];
+                            (.name | type) == "string" and
+                            (.name | length) > 0 and
+                            ((.name | test("[\\t\\r\\n]")) | not) and
+                            (.target | type) == "string" and
+                            (.target | test("^[0-9a-f]{40}$")) and
+                            (.root == null or (
+                                (.root | type) == "string" and
+                                ((.root | test("[\\t\\r\\n]")) | not)
+                            ))
+                        )
+                    ' "$jj_workspaces" >/dev/null; then
+                    jj_workspace_count=$(jq -s 'length' "$jj_workspaces") || jj_workspace_count=
+                    case "$jj_workspace_count" in
+                        ''|*[!0-9]*)
+                            echo "skip JJ cleanup: invalid workspace count" >&2
+                            ;;
+                        *) workspace_inventory_ok=1 ;;
+                    esac
+                else
+                    echo "skip JJ cleanup: workspace inventory was incomplete or malformed" >&2
+                fi
+            fi
+
+            if [ "$workspace_inventory_ok" -eq 1 ]; then
+                # Pass one performs every snapshot, identity check, and
+                # protection decision without deleting anything. Candidates
+                # are recorded only after all current evidence says removable.
+                removable_jj_workspaces=$sweep_tmp_dir/removable-jj-workspaces
+                if ! : > "$removable_jj_workspaces"; then
+                    workspace_inventory_ok=0
+                    closed_cleanup_safe=0
+                    jj_workspace_count=0
+                fi
+                jj_workspace_index=0
+                while [ "$jj_workspace_index" -lt "$jj_workspace_count" ]; do
+                    jj_name=$(jq -r -s --argjson i "$jj_workspace_index" '.[$i].name' "$jj_workspaces") || {
+                        closed_cleanup_safe=0
+                        break
+                    }
+                    jj_tip=$(jq -r -s --argjson i "$jj_workspace_index" '.[$i].target' "$jj_workspaces") || {
+                        closed_cleanup_safe=0
+                        break
+                    }
+                    jj_path=$(jq -r -s --argjson i "$jj_workspace_index" '.[$i].root // ""' "$jj_workspaces") || {
+                        closed_cleanup_safe=0
+                        break
+                    }
+                    jj_workspace_index=$((jj_workspace_index + 1))
+                    listed_jj_tip=$jj_tip
+                    # Unknown, missing, inaccessible, or changed workspaces are
+                    # retained and their associated PR stacks are protected.
+                    if [ -z "$jj_path" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || closed_cleanup_safe=0
+                        echo "skip JJ workspace with unknown root: $jj_name" >&2
+                        continue
+                    fi
+                    if [ ! -d "$jj_path" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || closed_cleanup_safe=0
+                        echo "skip missing JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+                    canonical=$(cd "$jj_path" 2>/dev/null && pwd -P) || {
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                        closed_cleanup_safe=0
+                        echo "skip inaccessible JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    }
+                    if ! jq -n -e --arg path "$canonical" \
+                        '$path | test("[\\t\\r\\n]") | not' >/dev/null; then
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                        closed_cleanup_safe=0
+                        echo "skip JJ workspace with unsafe canonical path: $jj_name" >&2
+                        continue
+                    fi
+
+                    # Colocated Git-backed JJ workspaces need both views: Git
+                    # detects file dirtiness while JJ identifies the true `@`
+                    # commit, which can differ from Git HEAD.
+                    workspace_is_git=0
+                    git_head=-
+                    if git -C "$jj_path" rev-parse --git-dir >/dev/null 2>&1; then
+                        workspace_is_git=1
+                        workspace_status=$(git -C "$jj_path" status --porcelain --untracked-files=all 2>/dev/null) || {
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            echo "skip unreadable JJ/Git workspace: $jj_path" >&2
+                            continue
+                        }
+                        git_head=$(git -C "$jj_path" rev-parse --verify HEAD 2>/dev/null) || {
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            continue
+                        }
+                        jj_live_tip=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph \
+                            -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || {
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            continue
+                        }
+                        # A mismatch means the inventory became stale during
+                        # this run. Preserve both possible stack roots.
+                        if [ "$listed_jj_tip" != "$jj_live_tip" ]; then
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip"
+                            protect_closed_heads_for_tip "$jj_root" "$jj_live_tip"
+                            echo "skip changed JJ/Git workspace: $jj_path" >&2
+                            continue
+                        fi
+                        jj_tip=$jj_live_tip
+                        if [ -n "$workspace_status" ]; then
+                            protect_closed_heads_for_tip "$jj_root" "$jj_tip"
+                            echo "skip dirty JJ/Git workspace: $jj_path" >&2
+                            continue
+                        fi
+                    else
+                        # In a native JJ workspace, `jj status` snapshots the
+                        # working copy. Compare `@` before and after so that a
+                        # concurrent snapshot/change cancels cleanup.
+                        jj_before=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || {
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            continue
+                        }
+                        if [ "$jj_before" != "$listed_jj_tip" ]; then
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                            echo "skip changed JJ workspace: $jj_path" >&2
+                            continue
+                        fi
+                        if ! jj status --no-pager -R "$jj_path" >/dev/null 2>&1; then
+                            protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                            closed_cleanup_safe=0
+                            echo "skip unreadable JJ workspace: $jj_path" >&2
+                            continue
+                        fi
+                        jj_tip=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || {
+                            protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                            closed_cleanup_safe=0
+                            continue
+                        }
+                        if [ "$jj_before" != "$jj_tip" ]; then
+                            protect_closed_heads_for_tip "$jj_root" "$jj_tip"
+                            echo "skip changed JJ workspace: $jj_path" >&2
+                            continue
+                        fi
+                    fi
+
+                    workspace_jj_tip=$jj_tip
+
+                    # First full identity check: the path must still represent
+                    # the inventoried workspace in the expected repository.
+                    if ! verify_jj_workspace_identity "$canonical" "$jj_name" "$workspace_jj_tip"; then
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip" || true
+                        closed_cleanup_safe=0
+                        echo "skip mismatched JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+
+                    # Retained workspaces are active references even when
+                    # their working-copy commit is otherwise disposable.
+                    # The primary workspace owns `.jj/repo` as a directory and
+                    # anchors the store; secondary workspaces have pointer files.
+                    if [ -d "$canonical/.jj/repo" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                        continue
+                    fi
+                    if [ "$canonical" = "$jj_current_root" ] ||
+                       [ "$canonical" = "$current_git_root" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                        echo "skip invoking JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+                    if [ ! -f "$canonical/.jj/repo" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                        echo "skip unrecognized JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+
+                    # A description on the working-copy commit is an explicit
+                    # sign of intent. Preserve it even when its Git HEAD or JJ
+                    # commit is already in default-branch history.
+                    if jj_tip_is_undescribed "$jj_root" "$workspace_jj_tip"; then
+                        :
+                    else
+                        description_status=$?
+                        if [ "$description_status" -eq 2 ]; then
+                            closed_cleanup_safe=0
+                            description_reason="unreadable description"
+                        else
+                            description_reason="described"
+                        fi
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                        echo "skip $description_reason JJ workspace: $jj_name ($jj_path)" >&2
+                        continue
+                    fi
+
+                    # Closed-PR disposal is separate from integration disposal.
+                    # A retained workspace protects its stack unless it is the
+                    # exact closed head (or JJ's empty child) and has no active
+                    # descendants elsewhere.
+                    closed_workspace_disposable=0
+                    if jj_tip_is_disposable_closed_workspace "$jj_root" "$workspace_jj_tip"; then
+                        closed_workspace_disposable=1
+                    else
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                    fi
+
+                    # Both predicates begin with the direct-history rule:
+                    # clean Git HEAD ancestors of the remote default tip and
+                    # clean JJ `@` ancestors of the fetched default are removable even
+                    # without any PR evidence.
+                    if [ "$workspace_is_git" -eq 1 ]; then
+                        git_integration_check_safe=1
+                        git_workspace_integrated=0
+                        git_tip_integrated "$git_head" && git_workspace_integrated=1
+                        if [ "$git_integration_check_safe" -ne 1 ]; then
+                            closed_cleanup_safe=0
+                        fi
+                        [ "$git_workspace_integrated" -eq 1 ] ||
+                            [ "$closed_workspace_disposable" -eq 1 ] || continue
+                    else
+                        jj_integration_check_safe=1
+                        jj_workspace_integrated=0
+                        jj_tip_integrated "$jj_path" "$workspace_jj_tip" && jj_workspace_integrated=1
+                        if [ "$jj_integration_check_safe" -ne 1 ]; then
+                            closed_cleanup_safe=0
+                        fi
+                        [ "$jj_workspace_integrated" -eq 1 ] ||
+                            [ "$closed_workspace_disposable" -eq 1 ] || continue
+                    fi
+
+                    # Tabs/newlines were rejected by the JSON validator, so a
+                    # compact TSV ledger preserves names and paths losslessly.
+                    candidate_git_head=${git_head:--}
+                    if ! printf '%s\t%s\t%s\t%s\t%s\n' \
+                        "$jj_name" "$workspace_jj_tip" "$canonical" \
+                        "$workspace_is_git" "$candidate_git_head" >> "$removable_jj_workspaces"; then
+                        workspace_inventory_ok=0
+                        closed_cleanup_safe=0
+                        break
+                    fi
+                done
+
+                # Pass two is all-or-nothing. Extraction, revset, or protection
+                # failures leave this flag false so no partially classified
+                # candidate can be removed.
+                if [ "$closed_cleanup_safe" -ne 1 ]; then
+                    workspace_inventory_ok=0
+                fi
+
+                # Pass two begins only after every retained workspace has
+                # protected its closed-PR ancestors. Re-evaluate eligibility,
+                # then repeat identity and cleanliness checks immediately
+                # before forgetting and deleting each candidate.
+                if [ "$workspace_inventory_ok" -eq 1 ]; then
+                    while IFS="$(printf '\t')" read -r \
+                        jj_name workspace_jj_tip canonical workspace_is_git candidate_git_head; do
+                        [ -n "$jj_name" ] || continue
+
+                        # Recheck the intent marker after pass one; a newly
+                        # added description cancels the candidate.
+                        if jj_tip_is_undescribed "$jj_root" "$workspace_jj_tip"; then
+                            :
+                        else
+                            description_status=$?
+                            if [ "$description_status" -eq 2 ]; then
+                                closed_cleanup_safe=0
+                            fi
+                            protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                            continue
+                        fi
+
+                        closed_workspace_disposable=0
+                        if jj_tip_is_disposable_closed_workspace "$jj_root" "$workspace_jj_tip"; then
+                            closed_workspace_disposable=1
+                        fi
+                        if [ "$workspace_is_git" -eq 1 ]; then
+                            git_integration_check_safe=1
+                            git_workspace_integrated=0
+                            git_tip_integrated "$candidate_git_head" && git_workspace_integrated=1
+                            [ "$git_integration_check_safe" -eq 1 ] || continue
+                            [ "$git_workspace_integrated" -eq 1 ] ||
+                                [ "$closed_workspace_disposable" -eq 1 ] || continue
+                        else
+                            jj_integration_check_safe=1
+                            jj_workspace_integrated=0
+                            jj_tip_integrated "$canonical" "$workspace_jj_tip" && jj_workspace_integrated=1
+                            [ "$jj_integration_check_safe" -eq 1 ] || continue
+                            [ "$jj_workspace_integrated" -eq 1 ] ||
+                                [ "$closed_workspace_disposable" -eq 1 ] || continue
+                        fi
+
+                        if [ "$dry" -eq 1 ]; then
+                            echo "would remove JJ workspace: $jj_name ($canonical)"
+                            continue
+                        fi
+
+                        if ! verify_jj_workspace_identity "$canonical" "$jj_name" "$workspace_jj_tip" ||
+                           ! verify_jj_workspace_clean_and_unchanged "$canonical" "$workspace_jj_tip" \
+                                "$workspace_is_git" "$candidate_git_head" ||
+                           ! verify_jj_workspace_identity "$canonical" "$jj_name" "$workspace_jj_tip"; then
+                            protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                            echo "skip changed JJ workspace before removal: $jj_name ($canonical)" >&2
+                            continue
+                        fi
+
+                        echo "remove JJ workspace: $jj_name ($canonical)"
+                        # Forget registration first. If it fails, keep the path
+                        # and disable later stack abandonment for this run.
+                        if ! jj --no-pager -R "$jj_root" workspace forget "$jj_name"; then
+                            closed_cleanup_safe=0
+                            echo "could not forget JJ workspace; closed PR stacks were kept: $jj_name" >&2
+                            continue
+                        fi
+                        rm -rf -- "$canonical"
+                    done < "$removable_jj_workspaces"
+                fi
+            fi
+
+            # Stack/bookmark cleanup is last because every retained or failed
+            # workspace must have had a chance to protect its stack first.
+            if [ -n "${sweep_tmp_dir-}" ] && [ "$workspace_inventory_ok" -eq 1 ]; then
+                cleanup_closed_jj_stacks
+            fi
+        fi
+    fi
+
+    # Remove the evidence ledger on normal completion. The trap handles every
+    # earlier return or signal path after temporary-directory creation.
+    if [ -n "${sweep_tmp_dir-}" ]; then
+        cleanup_sweep_tmp
+        trap - 0
+    fi
+}
+
+f "$@"
