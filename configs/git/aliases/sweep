@@ -22,6 +22,8 @@
 # --------------------------------
 # - Dirty, locked, current, primary, malformed, changed, or unverifiable state
 #   is always kept.
+# - A missing root `.gitignore` may be supplied transiently from the primary
+#   worktree; owned fallback files are removed without overwriting replacements.
 # - Git worktree HEAD and cleanliness are checked again immediately before
 #   removal; moved worktree metadata is repaired only during a real run.
 # - JJ workspace store/name/root/target identity is checked twice.
@@ -115,29 +117,88 @@ f() {
     # ----------------------------------------------------------------------
 
     # Patch IDs let squash-equivalent content qualify even though the original
-    # commit IDs are absent from the default branch's graph.
+    # commit IDs are absent from the default branch's graph. index default
+    # history once per sweep; candidate workspaces then perform one cached-file
+    # lookup instead of rescanning every default commit.
     patch_id_of_diff() {
-        git_patch=$(git diff --no-ext-diff --binary --no-renames "$1" "$2") || {
+        [ -n "${sweep_tmp_dir-}" ] || {
             git_integration_check_safe=0
             return 1
         }
-        git_patch_id=$(printf '%s\n' "$git_patch" | git patch-id --stable) || {
+        candidate_git_patch=$sweep_tmp_dir/candidate-git.patch
+        candidate_git_patch_id=$sweep_tmp_dir/candidate-git.patch-id
+        if ! git diff --no-ext-diff --binary --no-renames "$1" "$2" \
+            > "$candidate_git_patch" ||
+           ! git patch-id --stable < "$candidate_git_patch" \
+            > "$candidate_git_patch_id"; then
             git_integration_check_safe=0
             return 1
-        }
-        printf '%s\n' "$git_patch_id" | awk 'NR == 1 { print $1; exit }'
+        fi
+        awk 'NR == 1 { print $1; exit }' "$candidate_git_patch_id"
     }
 
-    patch_id_of_commit() {
-        git_patch=$(git show --no-ext-diff --format= --binary --no-renames "$1") || {
-            git_integration_check_safe=0
+    load_default_patch_ids() {
+        [ -n "${default_patch_ids-}" ] || return 1
+        [ "${default_patch_ids_failed-0}" -eq 0 ] || return 1
+        [ ! -f "$default_patch_ids" ] || return 0
+
+        default_patch_fifo=$sweep_tmp_dir/default-patches.fifo
+        default_patch_producer_ok=$sweep_tmp_dir/default-patches.producer-ok
+        default_patch_ids_raw=$sweep_tmp_dir/default-patch-ids.raw
+        default_patch_ids_normalized=$sweep_tmp_dir/default-patch-ids.normalized
+        default_patch_ids_staged=$sweep_tmp_dir/default-patch-ids.staged
+        rm -f -- "$default_patch_fifo" "$default_patch_producer_ok" \
+            "$default_patch_ids_raw" "$default_patch_ids_normalized" \
+            "$default_patch_ids_staged"
+        if ! mkfifo "$default_patch_fifo"; then
+            default_patch_ids_failed=1
             return 1
-        }
-        git_patch_id=$(printf '%s\n' "$git_patch" | git patch-id --stable) || {
-            git_integration_check_safe=0
+        fi
+
+        (
+            if git log --first-parent --no-merges --format=%H --patch \
+                --binary --no-renames "$default_tip"; then
+                : > "$default_patch_producer_ok"
+            fi
+        ) > "$default_patch_fifo" &
+        default_patch_producer_pid=$!
+        default_patch_consumer_status=0
+        git patch-id --stable < "$default_patch_fifo" \
+            > "$default_patch_ids_raw" || default_patch_consumer_status=$?
+        default_patch_producer_status=0
+        wait "$default_patch_producer_pid" || default_patch_producer_status=$?
+        rm -f -- "$default_patch_fifo"
+
+        if [ "$default_patch_consumer_status" -ne 0 ] ||
+           [ "$default_patch_producer_status" -ne 0 ] ||
+           [ ! -f "$default_patch_producer_ok" ] ||
+           ! awk '
+                NF == 2 && $1 ~ /^[0-9a-fA-F]+$/ {
+                    print tolower($1)
+                    next
+                }
+                { invalid = 1 }
+                END { exit invalid }
+            ' "$default_patch_ids_raw" > "$default_patch_ids_normalized" ||
+           ! LC_ALL=C sort -u "$default_patch_ids_normalized" \
+            > "$default_patch_ids_staged" ||
+           ! mv "$default_patch_ids_staged" "$default_patch_ids"; then
+            default_patch_ids_failed=1
             return 1
-        }
-        printf '%s\n' "$git_patch_id" | awk 'NR == 1 { print $1; exit }'
+        fi
+        return 0
+    }
+
+    default_history_has_patch_id() {
+        candidate_patch_id=$1
+        load_default_patch_ids || return 2
+        grep -Fqx -- "$candidate_patch_id" "$default_patch_ids"
+        patch_lookup_status=$?
+        case "$patch_lookup_status" in
+            0) return 0 ;;
+            1) return 1 ;;
+            *) return 2 ;;
+        esac
     }
 
     # This is the explicit "past history of the default branch" rule. A clean
@@ -180,45 +241,32 @@ f() {
         }
         [ -n "$branch_patch" ] || return 1
 
-        # Compare the whole branch patch with each first-parent commit. This is
-        # the common squash-merge case where graph ancestry cannot prove reuse.
-        default_commits=$(git log --first-parent --no-merges --format=%H "$default_tip") || {
-            git_integration_check_safe=0
-            return 1
-        }
-        for commit in $default_commits; do
-            commit_patch=$(patch_id_of_commit "$commit") || {
-                git_integration_check_safe=0
-                return 1
-            }
-            [ "$commit_patch" = "$branch_patch" ] && return 0
-        done
-        return 1
+        # compare the whole branch patch with the cached first-parent index.
+        # this is the common squash-merge case where ancestry cannot prove reuse.
+        default_history_has_patch_id "$branch_patch"
+        patch_lookup_status=$?
+        case "$patch_lookup_status" in
+            0) return 0 ;;
+            1) return 1 ;;
+            *) git_integration_check_safe=0; return 1 ;;
+        esac
     }
 
     jj_patch_id_of_diff() {
-        jj_patch=$(jj --no-pager --ignore-working-copy -R "$1" \
-            diff --from "$2" --to "$3" --git) || {
+        [ -n "${sweep_tmp_dir-}" ] || {
             jj_integration_check_safe=0
             return 1
         }
-        jj_patch_id=$(printf '%s\n' "$jj_patch" | git patch-id --stable) || {
+        candidate_jj_patch=$sweep_tmp_dir/candidate-jj.patch
+        candidate_jj_patch_id=$sweep_tmp_dir/candidate-jj.patch-id
+        if ! jj --no-pager --ignore-working-copy -R "$1" \
+            diff --from "$2" --to "$3" --git > "$candidate_jj_patch" ||
+           ! git patch-id --stable < "$candidate_jj_patch" \
+            > "$candidate_jj_patch_id"; then
             jj_integration_check_safe=0
             return 1
-        }
-        printf '%s\n' "$jj_patch_id" | awk 'NR == 1 { print $1; exit }'
-    }
-
-    jj_patch_id_of_commit() {
-        jj_patch=$(jj --no-pager --ignore-working-copy -R "$1" show --git -r "$2") || {
-            jj_integration_check_safe=0
-            return 1
-        }
-        jj_patch_id=$(printf '%s\n' "$jj_patch" | git patch-id --stable) || {
-            jj_integration_check_safe=0
-            return 1
-        }
-        printf '%s\n' "$jj_patch_id" | awk 'NR == 1 { print $1; exit }'
+        fi
+        awk 'NR == 1 { print $1; exit }' "$candidate_jj_patch_id"
     }
 
     # Use the exact fetched Git default SHA rather than JJ's configurable
@@ -298,19 +346,13 @@ f() {
             return 1
         }
         [ -n "$branch_patch" ] || return 1
-        jj_default_commits=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
-            -r "::$default_tip ~ merges()" -T 'commit_id ++ "\n"' 2>/dev/null) || {
-            jj_integration_check_safe=0
-            return 1
-        }
-        for commit in $jj_default_commits; do
-            commit_patch=$(jj_patch_id_of_commit "$jj_repo" "$commit") || {
-                jj_integration_check_safe=0
-                return 1
-            }
-            [ "$commit_patch" = "$branch_patch" ] && return 0
-        done
-        return 1
+        default_history_has_patch_id "$branch_patch"
+        patch_lookup_status=$?
+        case "$patch_lookup_status" in
+            0) return 0 ;;
+            1) return 1 ;;
+            *) jj_integration_check_safe=0; return 1 ;;
+        esac
     }
 
     # ----------------------------------------------------------------------
@@ -518,18 +560,35 @@ f() {
         # No matched closed bookmarks means there is nothing to protect, not
         # an inventory failure.
         [ -s "$closed_jj_bookmarks" ] || return 0
-        while IFS="$(printf '\t')" read -r closed_name closed_head; do
-            [ -n "$closed_name" ] || continue
-            # Protect the closed stack when this retained tip is anywhere in
-            # its descendant chain above the fetched default commit.
-            jj_relation=$(jj --no-pager --ignore-working-copy -R "$jj_repo" log --no-graph \
-                -r "$jj_tip & descendants($default_tip..$closed_head)" \
-                -T 'commit_id ++ "\n"' 2>/dev/null) || {
-                closed_cleanup_safe=0
-                return 1
+
+        # a retained tip protects each closed bookmark that shares any
+        # non-default ancestor with it. query all local bookmark targets at
+        # once, then intersect the result with the already validated closed
+        # ledger. this is equivalent to testing the tip against every
+        # `default..closed_head` range, without one JJ process per bookmark.
+        related_bookmark_heads=$sweep_tmp_dir/related-bookmark-heads
+        if ! jj --no-pager --ignore-working-copy -R "$jj_repo" \
+            log --no-graph \
+            -r "bookmarks() & descendants((::$jj_tip) ~ (::$default_tip))" \
+            -T 'commit_id ++ "\n"' > "$related_bookmark_heads" 2>/dev/null; then
+            closed_cleanup_safe=0
+            return 1
+        fi
+        related_closed_heads=$(awk -F '\t' '
+            FILENAME == ARGV[1] {
+                related_ids[tolower($1)] = 1
+                next
             }
-            [ -z "$jj_relation" ] || protect_closed_head "$closed_head"
-        done < "$closed_jj_bookmarks"
+            related_ids[tolower($2)] && !seen[tolower($2)]++ {
+                print tolower($2)
+            }
+        ' "$related_bookmark_heads" "$closed_jj_bookmarks") || {
+            closed_cleanup_safe=0
+            return 1
+        }
+        for closed_head in $related_closed_heads; do
+            protect_closed_head "$closed_head" || return 1
+        done
     }
 
     jj_tip_matches_closed_workspace_shape() {
@@ -603,16 +662,7 @@ f() {
                     ;;
             esac
 
-            while IFS="$(printf '\t')" read -r closed_name closed_head; do
-                [ -n "$closed_name" ] || continue
-                jj_relation=$(jj --no-pager --ignore-working-copy -R "$jj_root" log --no-graph \
-                    -r "$active_head & descendants($default_tip..$closed_head)" \
-                    -T 'commit_id ++ "\n"' 2>/dev/null) || {
-                    closed_cleanup_safe=0
-                    return
-                }
-                [ -z "$jj_relation" ] || protect_closed_head "$closed_head"
-            done < "$closed_jj_bookmarks"
+            protect_closed_heads_for_tip "$jj_root" "$active_head" || return
         done < "$jj_protection_bookmarks"
     }
 
@@ -696,9 +746,82 @@ f() {
     # ----------------------------------------------------------------------
 
     cleanup_sweep_tmp() {
+        cleanup_gitignore_fallback || true
         if [ -n "${sweep_tmp_dir-}" ] && [ -d "$sweep_tmp_dir" ]; then
             rm -rf -- "$sweep_tmp_dir"
         fi
+    }
+
+    cleanup_gitignore_fallback() {
+        [ "${fallback_gitignore_active-0}" -eq 1 ] || return 0
+        fallback_cleanup_status=0
+        fallback_ownership_changed=0
+        if [ -e "$fallback_gitignore_target" ] || [ -L "$fallback_gitignore_target" ]; then
+            if [ -e "$fallback_gitignore_staging" ] &&
+               [ "$fallback_gitignore_target" -ef "$fallback_gitignore_staging" ]; then
+                rm -f -- "$fallback_gitignore_target" || return 1
+            else
+                fallback_ownership_changed=1
+            fi
+        fi
+        rm -f -- "$fallback_gitignore_staging" || fallback_cleanup_status=1
+        [ "$fallback_cleanup_status" -eq 0 ] || return 1
+        fallback_gitignore_active=0
+        fallback_gitignore_target=
+        fallback_gitignore_staging=
+        [ "$fallback_ownership_changed" -eq 0 ]
+    }
+
+    verify_gitignore_fallback_ownership() {
+        [ "${fallback_gitignore_active-0}" -eq 1 ] || return 0
+        [ -e "$fallback_gitignore_staging" ] &&
+            [ -e "$fallback_gitignore_target" ] &&
+            [ "$fallback_gitignore_target" -ef "$fallback_gitignore_staging" ]
+    }
+
+    handle_sweep_signal() {
+        sweep_signal=$1
+        cleanup_sweep_tmp
+        trap - 0 HUP INT TERM
+        case "$sweep_signal" in
+            HUP) exit 129 ;;
+            INT) exit 130 ;;
+            TERM) exit 143 ;;
+        esac
+    }
+
+    install_gitignore_fallback() {
+        fallback_worktree=$1
+        requested_gitignore_target=$fallback_worktree/.gitignore
+        if [ "${fallback_gitignore_active-0}" -eq 1 ]; then
+            if [ "$fallback_gitignore_target" = "$requested_gitignore_target" ] &&
+               verify_gitignore_fallback_ownership; then
+                return 0
+            fi
+            cleanup_gitignore_fallback || return 1
+        fi
+
+        fallback_gitignore_target=$requested_gitignore_target
+        fallback_gitignore_staging=
+        fallback_gitignore_active=0
+
+        if [ -e "$fallback_gitignore_target" ] || [ -L "$fallback_gitignore_target" ]; then
+            return 0
+        fi
+        [ -n "${primary_gitignore_source-}" ] || return 1
+        [ -f "$primary_gitignore_source" ] && [ ! -L "$primary_gitignore_source" ] &&
+            [ -r "$primary_gitignore_source" ] || return 1
+
+        fallback_gitignore_staging=$(mktemp "$fallback_worktree/.gitignore.git-sweep.XXXXXX") || return 1
+        fallback_gitignore_active=1
+        if ! cp -- "$primary_gitignore_source" "$fallback_gitignore_staging" ||
+           ! printf '\n/.gitignore\n/%s\n' "${fallback_gitignore_staging##*/}" \
+                >> "$fallback_gitignore_staging" ||
+           ! ln -- "$fallback_gitignore_staging" "$fallback_gitignore_target"; then
+            cleanup_gitignore_fallback || true
+            return 1
+        fi
+        return 0
     }
 
     resolve_jj_store() {
@@ -747,19 +870,191 @@ f() {
                 ' >/dev/null
     }
 
+    jj_status_error_is_stale() {
+        status_error=$1
+
+        [ "$(awk 'END { print NR }' "$status_error" 2>/dev/null)" = 3 ] || return 1
+        sed -n '1p' "$status_error" |
+            grep -E '^Error: The working copy is stale \(not updated since operation [0-9a-f]+\)\.$' >/dev/null ||
+            return 1
+        [ "$(sed -n '2p' "$status_error")" = \
+            "Hint: Run \`jj workspace update-stale\` to update it." ] ||
+            return 1
+        [ "$(sed -n '3p' "$status_error")" = \
+            'See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy for more information.' ]
+    }
+
+    snapshot_jj_workspace() {
+        workspace_root=$1
+        workspace_name=$2
+        workspace_tip=$3
+        status_error=$sweep_tmp_dir/jj-status-error
+        jj_stale_repaired=0
+        jj_repaired_tip=
+
+        if jj status --no-pager -R "$workspace_root" >/dev/null 2> "$status_error"; then
+            return 0
+        fi
+        jj_status_error_is_stale "$status_error" || return 1
+        verify_jj_workspace_identity "$workspace_root" "$workspace_name" "$workspace_tip" ||
+            return 1
+        if [ "$dry" -eq 1 ]; then
+            echo "would update stale JJ workspace: $workspace_name ($workspace_root)"
+            return 2
+        fi
+        echo "update stale JJ workspace: $workspace_name ($workspace_root)"
+        jj --no-pager --config 'snapshot.auto-track="none()"' -R "$workspace_root" \
+            workspace update-stale >/dev/null || return 1
+        jj --config 'snapshot.auto-track="none()"' status --no-pager \
+            -R "$workspace_root" >/dev/null 2>&1 || return 1
+        jj_stale_repaired=1
+        divergent_state=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
+            -r "$workspace_tip" -T 'if(self.divergent(), "true\n", "false\n")' \
+            2>/dev/null) || return 1
+        case "$divergent_state" in
+            false)
+                jj_repaired_tip=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log \
+                    --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
+                verify_jj_workspace_identity "$workspace_root" "$workspace_name" "$jj_repaired_tip" ||
+                    return 1
+                ;;
+            true)
+                recovery_suffix=
+                recovery_change_id=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log \
+                    --no-graph -r "$workspace_tip" -T 'change_id ++ "\n"' 2>/dev/null) ||
+                    recovery_change_id=
+                case "$recovery_change_id" in
+                    ''|*[!a-z]*) ;;
+                    *)
+                        recovery_ids=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log \
+                            --no-graph -r "change_id($recovery_change_id)" \
+                            -T 'commit_id ++ "\n"' 2>/dev/null) || recovery_ids=
+                        if [ -n "$recovery_ids" ] &&
+                           printf '%s\n' "$recovery_ids" |
+                                awk 'length != 40 || /[^0-9a-f]/ { exit 1 }'; then
+                            recovery_ids=$(printf '%s\n' "$recovery_ids" |
+                                awk -v original="$workspace_tip" '$0 != original' |
+                                paste -sd ' ' -)
+                            [ -z "$recovery_ids" ] ||
+                                recovery_suffix="; recovery commits: $recovery_ids"
+                        fi
+                        ;;
+                esac
+                echo "retain repaired stale JJ workspace: $workspace_name ($workspace_root)"
+                echo "retain stale JJ workspace with recovery commit: $workspace_name ($workspace_root)$recovery_suffix"
+                closed_cleanup_safe=0
+                return 3
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    prove_path_absent_through_accessible_ancestor() {
+        missing_path=$1
+
+        case "$missing_path" in
+            /*) ;;
+            *) return 1 ;;
+        esac
+        [ ! -e "$missing_path" ] && [ ! -L "$missing_path" ] || return 1
+        accessible_ancestor=${missing_path%/*}
+        [ -n "$accessible_ancestor" ] || accessible_ancestor=/
+        while [ ! -e "$accessible_ancestor" ] && [ ! -L "$accessible_ancestor" ]; do
+            [ "$accessible_ancestor" != / ] || return 1
+            accessible_ancestor=${accessible_ancestor%/*}
+            [ -n "$accessible_ancestor" ] || accessible_ancestor=/
+        done
+        [ -d "$accessible_ancestor" ] && [ -r "$accessible_ancestor" ] && [ -x "$accessible_ancestor" ]
+    }
+
+    recover_missing_jj_workspace_path() {
+        workspace_name=$1
+        workspace_tip=$2
+        inventoried_root=$3
+        root_error=$sweep_tmp_dir/jj-workspace-root-error
+
+        resolved_root=$(jj --no-pager --ignore-working-copy -R "$jj_root" workspace root \
+            --name "$workspace_name" 2> "$root_error") && return 1
+        [ -z "$resolved_root" ] || return 1
+        [ "$(awk 'END { print NR }' "$root_error" 2>/dev/null)" = 2 ] || return 1
+        missing_root=$(sed -n '1s/^Error: Cannot resolve absolute workspace path: //p' "$root_error")
+        [ -n "$missing_root" ] || return 1
+        [ "$(sed -n '2p' "$root_error")" = 'Caused by: No such file or directory (os error 2)' ] ||
+            return 1
+        case "$missing_root" in
+            *"	"*|*"
+"*) return 1 ;;
+        esac
+        verified_missing_root=$missing_root
+        if [ -n "$inventoried_root" ]; then
+            missing_parent=${missing_root%/*}
+            missing_name=${missing_root##*/}
+            [ -n "$missing_name" ] || return 1
+            canonical_missing_parent=$(cd "$missing_parent" 2>/dev/null && pwd -P) || return 1
+            verified_missing_root=$canonical_missing_parent/$missing_name
+            [ "$inventoried_root" = "$verified_missing_root" ] || return 1
+        fi
+        live_store=$(resolve_jj_store "$jj_root") || return 1
+        [ "$live_store" = "$jj_expected_store" ] || return 1
+        missing_inventory=$(jj workspace list --ignore-working-copy --no-pager -R "$jj_root" \
+            -T '"{\"name\":" ++ stringify(name).escape_json() ++ ",\"target\":" ++ stringify(target.commit_id()).escape_json() ++ ",\"root\":" ++ json(root) ++ "}\n"' \
+            2>/dev/null) || return 1
+        printf '%s\n' "$missing_inventory" |
+            jq -e -s --arg name "$workspace_name" --arg target "$workspace_tip" '
+                [.[] | select(
+                    .name == $name and
+                    .target == $target and
+                    .root == null
+                )] | length == 1 and
+                ([.[] | select(.name == $name)] | length == 1)
+            ' >/dev/null || return 1
+        prove_path_absent_through_accessible_ancestor "$verified_missing_root" || return 1
+        printf '%s\n' "$verified_missing_root"
+    }
+
+    forget_missing_jj_workspace() {
+        workspace_name=$1
+        workspace_tip=$2
+        inventoried_root=$3
+
+        missing_root=$(recover_missing_jj_workspace_path \
+            "$workspace_name" "$workspace_tip" "$inventoried_root") || return 1
+        if [ "$dry" -eq 1 ]; then
+            echo "would forget missing JJ workspace: $workspace_name ($missing_root)"
+            return 0
+        fi
+        # JJ has no atomic conditional forget, so narrow the race window with
+        # a second complete identity and absence proof immediately beforehand.
+        confirmed_missing_root=$(recover_missing_jj_workspace_path \
+            "$workspace_name" "$workspace_tip" "$inventoried_root") || return 1
+        [ "$confirmed_missing_root" = "$missing_root" ] || return 1
+        echo "forget missing JJ workspace: $workspace_name ($missing_root)"
+        jj --no-pager --ignore-working-copy -R "$jj_root" workspace forget -- "$workspace_name" ||
+            return 1
+        remaining_inventory=$(jj workspace list --ignore-working-copy --no-pager -R "$jj_root" \
+            -T 'stringify(name) ++ "\n"' 2>/dev/null) || return 1
+        ! printf '%s\n' "$remaining_inventory" | grep -Fx -- "$workspace_name" >/dev/null
+    }
+
     verify_jj_workspace_clean_and_unchanged() {
         workspace_root=$1
         workspace_tip=$2
         workspace_is_git=$3
         workspace_git_head=$4
+        workspace_name=$5
 
         if [ "$workspace_is_git" -eq 1 ]; then
             # Git-backed workspaces must retain both identities: Git HEAD and
             # JJ `@`. A clean Git index/worktree is required at this instant.
-            live_git_head=$(git -C "$workspace_root" rev-parse --verify HEAD 2>/dev/null) || return 1
-            [ "$live_git_head" = "$workspace_git_head" ] || return 1
-            live_git_status=$(git -C "$workspace_root" status --porcelain --untracked-files=all 2>/dev/null) || return 1
-            [ -z "$live_git_status" ] || return 1
+            inspect_git_worktree "$workspace_root" || return 1
+            live_git_head=$inspected_head
+            live_git_status=$inspected_status
+            if [ "$live_git_head" != "$workspace_git_head" ] ||
+               [ -n "$live_git_status" ] ||
+               ! cleanup_gitignore_fallback; then
+                cleanup_gitignore_fallback || true
+                return 1
+            fi
             live_jj_tip=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
                 -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
             [ "$live_jj_tip" = "$workspace_tip" ] || return 1
@@ -772,11 +1067,16 @@ f() {
         live_jj_before=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
             -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
         [ "$live_jj_before" = "$workspace_tip" ] || return 1
-        jj status --no-pager -R "$workspace_root" >/dev/null 2>&1 || return 1
+        snapshot_jj_workspace "$workspace_root" "$workspace_name" "$workspace_tip" || return $?
         live_jj_after=$(jj --no-pager --ignore-working-copy -R "$workspace_root" log --no-graph \
             -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || return 1
-        [ "$live_jj_after" = "$workspace_tip" ] || return 1
-        jj_tip_is_undescribed "$workspace_root" "$workspace_tip"
+        if [ "$jj_stale_repaired" -eq 1 ]; then
+            [ "$live_jj_after" = "$jj_repaired_tip" ] || return 1
+            jj_tip_is_undescribed "$workspace_root" "$jj_repaired_tip"
+        else
+            [ "$live_jj_after" = "$workspace_tip" ] || return 1
+            jj_tip_is_undescribed "$workspace_root" "$workspace_tip"
+        fi
     }
 
     # Resolve the shared Git metadata once. Linked worktrees may have stale
@@ -823,6 +1123,8 @@ f() {
         inspected_status=
         worktree_needs_repair=0
 
+        install_gitignore_fallback "$inspected_worktree" || return 1
+
         # Normal worktrees use their own `.git` pointer. This is the common and
         # preferred path because Git validates the complete linkage for us.
         if inspected_head=$(git -C "$inspected_worktree" rev-parse --verify HEAD 2>/dev/null) &&
@@ -832,11 +1134,20 @@ f() {
 
         # If the pointer is stale, inspect through the current registration.
         # No metadata is repaired here, keeping dry-run strictly read-only.
-        registered_git_dir=$(registered_git_dir_for_worktree "$inspected_worktree") || return 1
+        registered_git_dir=$(registered_git_dir_for_worktree "$inspected_worktree") || {
+            cleanup_gitignore_fallback || true
+            return 1
+        }
         inspected_head=$(git --git-dir="$registered_git_dir" --work-tree="$inspected_worktree" \
-            rev-parse --verify HEAD 2>/dev/null) || return 1
+            rev-parse --verify HEAD 2>/dev/null) || {
+            cleanup_gitignore_fallback || true
+            return 1
+        }
         inspected_status=$(git --git-dir="$registered_git_dir" --work-tree="$inspected_worktree" \
-            status --porcelain --untracked-files=all 2>/dev/null) || return 1
+            status --porcelain --untracked-files=all 2>/dev/null) || {
+            cleanup_gitignore_fallback || true
+            return 1
+        }
         worktree_needs_repair=1
     }
 
@@ -848,13 +1159,48 @@ f() {
     }
     if [ -n "$sweep_tmp_dir" ]; then
         trap cleanup_sweep_tmp 0
+        trap 'handle_sweep_signal HUP' HUP
+        trap 'handle_sweep_signal INT' INT
+        trap 'handle_sweep_signal TERM' TERM
         closed_pr_heads=$sweep_tmp_dir/closed-pr-heads
         merged_pr_heads=$sweep_tmp_dir/merged-pr-heads
+        default_patch_ids=$sweep_tmp_dir/default-patch-ids
+        default_patch_ids_failed=0
         removable_git_worktree_branches=$sweep_tmp_dir/removable-git-worktree-branches
         unsafe_git_worktree_paths=$sweep_tmp_dir/unsafe-git-worktree-paths
         : > "$removable_git_worktree_branches" || removable_git_worktree_branches=
         : > "$unsafe_git_worktree_paths" || unsafe_git_worktree_paths=
         load_closed_pr_heads
+    fi
+
+    primary_gitignore_source=
+    git_worktree_inventory=
+    if [ -n "${sweep_tmp_dir-}" ]; then
+        git_worktree_inventory=$sweep_tmp_dir/git-worktrees
+        if git worktree list --porcelain > "$git_worktree_inventory"; then
+            primary_worktree_record=
+            IFS= read -r primary_worktree_record < "$git_worktree_inventory" || true
+            case "$primary_worktree_record" in
+                worktree\ /*)
+                    primary_worktree=${primary_worktree_record#worktree }
+                    case "$primary_worktree" in
+                        *"$(printf '\t')"*) ;;
+                        *)
+                            primary_worktree=$(cd "$primary_worktree" 2>/dev/null && pwd -P) ||
+                                primary_worktree=
+                            if [ -n "$primary_worktree" ] &&
+                               [ -f "$primary_worktree/.gitignore" ] &&
+                               [ ! -L "$primary_worktree/.gitignore" ] &&
+                               [ -r "$primary_worktree/.gitignore" ]; then
+                                primary_gitignore_source=$primary_worktree/.gitignore
+                            fi
+                            ;;
+                    esac
+                    ;;
+            esac
+        else
+            git_worktree_inventory=
+        fi
     fi
 
     # Canonical roots are used for identity checks; display paths remain as Git
@@ -947,19 +1293,18 @@ f() {
         fi
         [ -d "$wt" ] || return
         canonical=$(cd "$wt" 2>/dev/null && pwd -P) || return
+        # The invoking worktree is repository context, never a cleanup
+        # candidate. Keep this guard ahead of both Git and JJ classification.
+        [ "$canonical" != "$current_git_root" ] || return
         # Colocated JJ workspaces need JJ identity/reference checks below. Do
         # not let the simpler Git path bypass those protections.
         if [ -e "$canonical/.jj" ]; then
             echo "defer JJ-backed Git worktree: $wt" >&2
             return
         fi
-        if [ "$canonical" = "$current_git_root" ]; then
-            echo "skip invoking worktree: $wt" >&2
-            return
-        fi
         # Classify only a readable, unchanged, fully clean worktree. Untracked
         # files count as dirty because removing the directory would lose them.
-        if ! inspect_git_worktree "$canonical"; then
+        if ! inspect_git_worktree "$canonical" || ! cleanup_gitignore_fallback; then
             echo "skip unreadable worktree: $wt" >&2
             return
         fi
@@ -990,6 +1335,7 @@ f() {
                 return
             fi
             if [ "$inspected_head" != "$head" ] || [ -n "$inspected_status" ]; then
+                cleanup_gitignore_fallback || true
                 echo "skip changed worktree before removal: $wt" >&2
                 return
             fi
@@ -1003,20 +1349,27 @@ f() {
                    [ "$worktree_needs_repair" -ne 0 ] ||
                    [ "$inspected_head" != "$head" ] ||
                    [ -n "$inspected_status" ]; then
+                    cleanup_gitignore_fallback || true
                     echo "skip worktree that could not be safely repaired: $wt" >&2
                     return
                 fi
             fi
+            if ! verify_gitignore_fallback_ownership; then
+                cleanup_gitignore_fallback || true
+                echo "skip changed worktree before removal: $wt" >&2
+                return
+            fi
             echo "remove worktree: $wt"
             git worktree remove "$wt" || echo "could not remove worktree: $wt" >&2
+            cleanup_gitignore_fallback ||
+                echo "could not clean temporary ignore files: $wt" >&2
         fi
     }
 
     # Porcelain records are blank-line delimited. Processing one record at a
     # time avoids human-oriented output; unusual paths that Git C-quotes (or
     # that contain ledger delimiters) are detected and skipped fail-closed.
-    git worktree list --porcelain |
-    {
+    process_git_worktree_inventory() {
         while IFS= read -r line; do
             if [ -z "$line" ]; then
                 process_git_worktree
@@ -1042,6 +1395,12 @@ f() {
         done
         process_git_worktree
     }
+
+    if [ -n "${git_worktree_inventory-}" ]; then
+        process_git_worktree_inventory < "$git_worktree_inventory"
+    else
+        git worktree list --porcelain | process_git_worktree_inventory
+    fi
 
     # `git worktree prune` removes only stale administrative records; it does
     # not delete a live worktree directory. `--expire now` includes every entry
@@ -1112,6 +1471,9 @@ f() {
                 continue
             fi
             if [ -n "$checked_out_path" ]; then
+                # The invoking worktree and its checked-out branch are outside
+                # sweep's cleanup scope and remain silent in every pass.
+                [ "$checked_out_path" != "$current_git_root" ] || continue
                 if [ "$dry" -eq 1 ] &&
                    [ -n "${removable_git_worktree_branches-}" ] &&
                    grep -Fqx "$(printf '%s\t%s' "$local_branch" "$local_head")" \
@@ -1246,16 +1608,22 @@ f() {
                     }
                     jj_workspace_index=$((jj_workspace_index + 1))
                     listed_jj_tip=$jj_tip
-                    # Unknown, missing, inaccessible, or changed workspaces are
-                    # retained and their associated PR stacks are protected.
+                    # missing registrations are forgotten only after JJ
+                    # re-derives their exact path and absence is proved.
                     if [ -z "$jj_path" ]; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || closed_cleanup_safe=0
-                        echo "skip JJ workspace with unknown root: $jj_name" >&2
+                        if ! forget_missing_jj_workspace "$jj_name" "$listed_jj_tip" ''; then
+                            closed_cleanup_safe=0
+                            echo "skip JJ workspace with unverifiable root: $jj_name" >&2
+                        fi
                         continue
                     fi
                     if [ ! -d "$jj_path" ]; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || closed_cleanup_safe=0
-                        echo "skip missing JJ workspace: $jj_name ($jj_path)" >&2
+                        if ! forget_missing_jj_workspace "$jj_name" "$listed_jj_tip" "$jj_path"; then
+                            closed_cleanup_safe=0
+                            echo "skip unverifiable missing JJ workspace: $jj_name ($jj_path)" >&2
+                        fi
                         continue
                     fi
                     canonical=$(cd "$jj_path" 2>/dev/null && pwd -P) || {
@@ -1272,24 +1640,38 @@ f() {
                         continue
                     fi
 
+                    # the invoking workspace is repository context, never a
+                    # cleanup candidate. protect its inventoried tip without
+                    # probing Git status, snapshotting JJ, or reporting it.
+                    if [ "$canonical" = "$jj_current_root" ] ||
+                       [ "$canonical" = "$current_git_root" ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" ||
+                            closed_cleanup_safe=0
+                        continue
+                    fi
+
                     # Colocated Git-backed JJ workspaces need both views: Git
                     # detects file dirtiness while JJ identifies the true `@`
                     # commit, which can differ from Git HEAD.
                     workspace_is_git=0
                     git_head=-
+                    jj_stale_repaired=0
                     if git -C "$jj_path" rev-parse --git-dir >/dev/null 2>&1; then
                         workspace_is_git=1
-                        workspace_status=$(git -C "$jj_path" status --porcelain --untracked-files=all 2>/dev/null) || {
+                        inspect_git_worktree "$canonical" || {
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
                             closed_cleanup_safe=0
                             echo "skip unreadable JJ/Git workspace: $jj_path" >&2
                             continue
                         }
-                        git_head=$(git -C "$jj_path" rev-parse --verify HEAD 2>/dev/null) || {
+                        workspace_status=$inspected_status
+                        git_head=$inspected_head
+                        if ! cleanup_gitignore_fallback; then
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
                             closed_cleanup_safe=0
+                            echo "skip unreadable JJ/Git workspace: $jj_path" >&2
                             continue
-                        }
+                        fi
                         jj_live_tip=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph \
                             -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || {
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
@@ -1325,18 +1707,39 @@ f() {
                             echo "skip changed JJ workspace: $jj_path" >&2
                             continue
                         fi
-                        if ! jj status --no-pager -R "$jj_path" >/dev/null 2>&1; then
-                            protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
-                            closed_cleanup_safe=0
-                            echo "skip unreadable JJ workspace: $jj_path" >&2
-                            continue
-                        fi
+                        snapshot_jj_workspace "$jj_path" "$jj_name" "$jj_before"
+                        snapshot_status=$?
+                        case "$snapshot_status" in
+                            0) ;;
+                            2)
+                                protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                                continue
+                                ;;
+                            3)
+                                protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                                continue
+                                ;;
+                            *)
+                                protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                                closed_cleanup_safe=0
+                                echo "skip unreadable JJ workspace: $jj_path" >&2
+                                continue
+                                ;;
+                        esac
                         jj_tip=$(jj --no-pager --ignore-working-copy -R "$jj_path" log --no-graph -r @ -T 'commit_id ++ "\n"' 2>/dev/null) || {
                             protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
                             closed_cleanup_safe=0
                             continue
                         }
-                        if [ "$jj_before" != "$jj_tip" ]; then
+                        if [ "$jj_stale_repaired" -eq 1 ]; then
+                            [ "$jj_tip" = "$jj_repaired_tip" ] || {
+                                protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                                protect_closed_heads_for_tip "$jj_root" "$jj_tip" || true
+                                closed_cleanup_safe=0
+                                echo "skip changed repaired JJ workspace: $jj_path" >&2
+                                continue
+                            }
+                        elif [ "$jj_before" != "$jj_tip" ]; then
                             protect_closed_heads_for_tip "$jj_root" "$jj_tip"
                             echo "skip changed JJ workspace: $jj_path" >&2
                             continue
@@ -1353,19 +1756,18 @@ f() {
                         echo "skip mismatched JJ workspace: $jj_name ($jj_path)" >&2
                         continue
                     fi
-
+                    if [ "$jj_stale_repaired" -eq 1 ]; then
+                        protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip"
+                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                        echo "retain repaired stale JJ workspace: $jj_name ($canonical)"
+                        continue
+                    fi
                     # Retained workspaces are active references even when
                     # their working-copy commit is otherwise disposable.
                     # The primary workspace owns `.jj/repo` as a directory and
                     # anchors the store; secondary workspaces have pointer files.
                     if [ -d "$canonical/.jj/repo" ]; then
                         protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
-                        continue
-                    fi
-                    if [ "$canonical" = "$jj_current_root" ] ||
-                       [ "$canonical" = "$current_git_root" ]; then
-                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
-                        echo "skip invoking JJ workspace: $jj_name ($jj_path)" >&2
                         continue
                     fi
                     if [ ! -f "$canonical/.jj/repo" ]; then
@@ -1493,12 +1895,20 @@ f() {
                             continue
                         fi
 
+                        jj_stale_repaired=0
                         if ! verify_jj_workspace_identity "$canonical" "$jj_name" "$workspace_jj_tip" ||
                            ! verify_jj_workspace_clean_and_unchanged "$canonical" "$workspace_jj_tip" \
-                                "$workspace_is_git" "$candidate_git_head" ||
-                           ! verify_jj_workspace_identity "$canonical" "$jj_name" "$workspace_jj_tip"; then
+                                "$workspace_is_git" "$candidate_git_head" "$jj_name" ||
+                           ! verify_jj_workspace_identity "$canonical" "$jj_name" \
+                                "${jj_repaired_tip:-$workspace_jj_tip}"; then
                             protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
                             echo "skip changed JJ workspace before removal: $jj_name ($canonical)" >&2
+                            continue
+                        fi
+                        if [ "$jj_stale_repaired" -eq 1 ]; then
+                            protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip"
+                            protect_closed_heads_for_tip "$jj_root" "$jj_repaired_tip"
+                            echo "retain repaired stale JJ workspace: $jj_name ($canonical)"
                             continue
                         fi
 
@@ -1527,7 +1937,7 @@ f() {
     # earlier return or signal path after temporary-directory creation.
     if [ -n "${sweep_tmp_dir-}" ]; then
         cleanup_sweep_tmp
-        trap - 0
+        trap - 0 HUP INT TERM
     fi
 }
 
