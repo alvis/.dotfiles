@@ -27,6 +27,10 @@
 # - Primary/invoking checkouts are always kept. Temp registrations can be
 #   forgotten regardless of contents/history; their files are never removed.
 # - Outside temp roots, dirty, locked, malformed or unverifiable state is kept.
+#   The one opt-in exception, --force-remove-after[=N], removes a checkout
+#   the rules retain once it is idle for N days, without saving its work,
+#   unless it is primary, invoking, locked, mid-operation, conflicted, holds a
+#   nested repository, or cannot be verified.
 # - A missing root `.gitignore` may be supplied transiently from the primary
 #   worktree in every mode, including dry-run; owned temporary files are removed.
 # - Git worktree HEAD and cleanliness are checked again immediately before
@@ -44,6 +48,13 @@
 render_report() {
 awk -F '\t' '
     function concise(reason) {
+        # Reasons that only --force-remove-after produces.
+        if (reason ~ /^idle checkout is force-removed without saving$/) return "Idle; force-removed"
+        if (reason ~ /^recently active checkout is kept$/) return "Recently active"
+        if (reason ~ /^Git operation in progress keeps checkout$/) return "Operation in progress"
+        if (reason ~ /^nested repository is kept$/) return "Nested repository"
+        if (reason ~ /^checkout activity could not be verified$/) return "Activity unverifiable"
+        if (reason ~ /^JJ working copy has unresolved conflicts$/) return "Unresolved JJ conflict"
         if (reason ~ /primary|invoking/) return "Primary checkout"
         if (reason ~ /dry-run cannot snapshot/) return "Snapshot required"
         if (reason ~ /snapshot found working-copy changes/) return "Dirty checkout"
@@ -133,16 +144,23 @@ f() {
 
     usage() {
         printf '%s\n' \
-            'usage: git sweep [help] [--dry-run] [--update-snapshot]' \
+            'usage: git sweep [help] [--dry-run] [--update-snapshot] [--force-remove-after[=N]]' \
             '' \
             '    help                  show this help' \
             '    --dry-run             fetch, then preview cleanup without removing anything' \
             '    --update-snapshot     allow JJ snapshots during preview; may alter working-copy files and JJ state' \
+            '    --force-remove-after[=N]' \
+            '                          also remove kept checkouts idle for N days (default 7, 0 skips' \
+            '                          the activity check), discarding their uncommitted changes;' \
+            '                          primary, invoking, locked, mid-operation, nested-repository and' \
+            '                          unverifiable checkouts stay' \
             ''
     }
 
     dry=0
     update_snapshot=0
+    # Empty unless --force-remove-after was given: the idle threshold in days.
+    force_after_days=
     while [ "$#" -gt 0 ]; do
         case "$1" in
             help)
@@ -155,6 +173,16 @@ f() {
                 ;;
             --dry-run) dry=1 ;;
             --update-snapshot) update_snapshot=1 ;;
+            --force-remove-after) force_after_days=7 ;;
+            --force-remove-after=*)
+                force_after_days=${1#--force-remove-after=}
+                case "$force_after_days" in
+                    ''|*[!0123456789]*)
+                        usage >&2
+                        return 2
+                        ;;
+                esac
+                ;;
             *)
                 usage >&2
                 return 2
@@ -162,6 +190,16 @@ f() {
         esac
         shift
     done
+    if [ -n "$force_after_days" ]; then
+        # Decimal days without leading zeros, so shell arithmetic never reads
+        # octal. Beyond 999999999 days no timestamp can be idle anyway.
+        while :; do
+            case "$force_after_days" in 0?*) force_after_days=${force_after_days#0} ;; *) break ;; esac
+        done
+        [ "${#force_after_days}" -le 9 ] || force_after_days=999999999
+        force_now=$(date +%s) || return 1
+        force_cutoff=$((force_now - force_after_days * 86400))
+    fi
 
     if [ "$update_snapshot" -eq 1 ] && [ "$dry" -ne 1 ]; then
         echo 'git sweep: --update-snapshot requires --dry-run' >&2
@@ -332,6 +370,9 @@ f() {
                     temp_forgotten_in_tree=1 ;;
             missing-jj)
                 forget_missing_jj_workspace "$action_a" "$action_b" "$action_c" ;;
+            force-git)
+                [ "$(registered_git_dir_for_worktree "$action_path")" = "$action_c" ] || return 1
+                force_remove_git_worktree "$action_path" "$action_a" "$action_c" ;;
             git)
                 [ "$(registered_git_dir_for_worktree "$action_path")" = "$action_c" ] || return 1
                 wt=$action_path; head=$action_a; worktree_branch=$action_b
@@ -1612,6 +1653,7 @@ DISK_WORKER
         query_pr_heads closed "$closed_only_pr_heads_raw" &
         closed_pr_query=$!
         pr_query_pids="$merged_pr_query $closed_pr_query"
+        [ -z "$force_after_days" ] || start_force_prefetch
         wait "$merged_pr_query"
         merged_pr_status=$?
         wait "$closed_pr_query"
@@ -1984,7 +2026,8 @@ DISK_WORKER
     git_inspection_values='git_proof_stage inspected_head inspected_git_admin
         inspected_status inspected_status_kind inspected_status_example
         worktree_integrated worktree_evidence worktree_failure
-        git_integration_check_safe admin_retirement_blocker'
+        git_integration_check_safe admin_retirement_blocker
+        force_decision force_reason force_detail force_active'
     jj_inspection_values='jj_proof_stage jj_integration_check_safe
         jj_integration_evidence jj_integration_failure workspace_is_git git_head
         plan_jj_git_admin admin_retirement_blocker disk_proof_ok
@@ -2374,6 +2417,33 @@ DISK_WORKER
         grep -Eq '^Error: The working copy is stale \(not updated since operation [0-9a-f]+\)\.$' \
             "$status_error" 2>/dev/null || return 1
         [ "$(grep -c '^Error:' "$status_error" 2>/dev/null)" = 1 ]
+    }
+
+    # Sets primary_worktree from the first record of the porcelain worktree
+    # list in file $1, and primary_gitignore_source to its root .gitignore
+    # when that is a regular readable file.
+    read_primary_worktree() {
+        primary_gitignore_source=
+        primary_worktree_record=
+        IFS= read -r primary_worktree_record < "$1" || true
+        case "$primary_worktree_record" in
+            worktree\ /*)
+                primary_worktree=${primary_worktree_record#worktree }
+                case "$primary_worktree" in
+                    *"$(printf '\t')"*) ;;
+                    *)
+                        primary_worktree=$(cd "$primary_worktree" 2>/dev/null && pwd -P) ||
+                            primary_worktree=
+                        if [ -n "$primary_worktree" ] &&
+                           [ -f "$primary_worktree/.gitignore" ] &&
+                           [ ! -L "$primary_worktree/.gitignore" ] &&
+                           [ -r "$primary_worktree/.gitignore" ]; then
+                            primary_gitignore_source=$primary_worktree/.gitignore
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
     }
 
     prepare_workspace_ignore() {
@@ -3382,6 +3452,432 @@ EOF
         git_admin_anchors_are_retained "$1" "${2-}" "${3-}"
     }
 
+    # ----------------------------------------------------------------------
+    # --force-remove-after: activity, hard guards, and what removal discards
+    # ----------------------------------------------------------------------
+
+    format_force_age() {
+        if [ "$1" -ge 172800 ]; then
+            printf '%s days' "$(($1 / 86400))"
+        elif [ "$1" -ge 86400 ]; then
+            printf '1 day'
+        elif [ "$1" -ge 7200 ]; then
+            printf '%s hours' "$(($1 / 3600))"
+        elif [ "$1" -ge 120 ]; then
+            printf '%s minutes' "$(($1 / 60))"
+        else
+            printf 'under 2 minutes'
+        fi
+    }
+
+    is_epoch() {
+        case "$1" in ''|*[!0123456789]*) return 1 ;; esac
+    }
+
+    # Records activity at epoch $1 described by $2. Succeeds, setting
+    # force_active, when that activity is newer than the idle cutoff.
+    note_force_activity() {
+        case "$1" in ''|*[!0123456789]*) return 1 ;; esac
+        if [ -z "$force_newest" ] || [ "$1" -gt "$force_newest" ]; then
+            force_newest=$1
+            force_newest_signal=$2
+        fi
+        [ "$1" -gt "$force_cutoff" ] || return 1
+        force_active="$2 $(format_force_age "$((force_now - $1))") ago"
+    }
+
+    # The newest timestamp written inside a reflog's entries, 0 without a
+    # reflog. The file's own mtime is never used.
+    newest_reflog_time() {
+        if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+            printf '0\n'
+            return 0
+        fi
+        [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || return 1
+        awk -F '\t' '{
+                n = split($1, field, " ")
+                if (n >= 6 && field[n - 1] ~ /^[0-9]+$/ && field[n] ~ /^[-+][0-9][0-9][0-9][0-9]$/ &&
+                    field[n - 1] + 0 > newest) newest = field[n - 1] + 0
+            }
+            END { printf "%d\n", newest }' "$1"
+    }
+
+    # The third signal: the NUL-separated paths in $2, relative to root $1,
+    # are examined one at a time in list order. The first file newer than
+    # the cutoff ends the scan, so no later entry is examined. Returns 0
+    # when a newer file was found (force_scan_path, force_scan_time), 1
+    # when none was (force_scan_path names the newest file, if any), and 2
+    # when an entry could not be examined.
+    scan_force_files() {
+        force_scan=$sweep_tmp_dir/force-scan
+        force_scan_path=
+        force_scan_time=
+        [ -n "$force_reference" ] && [ -f "$force_reference" ] || return 2
+        rm -rf -- "$force_scan" && mkdir "$force_scan" || return 2
+        xargs -0 sh "$force_worker" "$force_scan" "$1" "$force_reference" < "$2" 2>/dev/null
+        force_scan_status=$?
+        for force_scan_result in active error newest; do
+            [ -f "$force_scan/$force_scan_result" ] || continue
+            force_scan_path=$(cat -- "$force_scan/$force_scan_result" && printf .) || return 2
+            force_scan_path=${force_scan_path%.}
+            case "$force_scan_result" in
+                active)
+                    force_scan_time=$(date -r "$1/$force_scan_path" +%s 2>/dev/null) ||
+                        force_scan_time=$((force_cutoff + 1))
+                    return 0
+                    ;;
+                error) return 2 ;;
+            esac
+            break
+        done
+        [ "$force_scan_status" -eq 0 ] || return 2
+        if [ -n "$force_scan_path" ]; then
+            force_scan_time=$(date -r "$1/$force_scan_path" +%s 2>/dev/null) || return 2
+        fi
+        return 1
+    }
+
+    # A guard keeps the checkout whatever its age; `unverifiable` marks
+    # evidence that could not be read, which keeps it too.
+    force_guard() {
+        force_decision=guard
+        force_reason=$1
+        force_detail=$2
+    }
+
+    # Signals 1 and 2 have been noted; scan the listed files unless one
+    # already showed activity. Succeeds when the checkout is active.
+    force_checkout_is_active() {
+        if [ -n "$force_active" ]; then
+            force_decision=active
+            return 0
+        fi
+        scan_force_files "$1" "$2"
+        case "$?" in
+            0)
+                force_scan_path=$(jq -Rn --arg path "$force_scan_path" '$path') || force_scan_path='""'
+                note_force_activity "$force_scan_time" "changed file $force_scan_path" || true
+                force_active=${force_active:-"changed file $force_scan_path newer than the cutoff"}
+                force_decision=active
+                return 0
+                ;;
+            1)
+                if [ -n "$force_scan_path" ]; then
+                    force_scan_path=$(jq -Rn --arg path "$force_scan_path" '$path') || force_scan_path='""'
+                    note_force_activity "$force_scan_time" "changed file $force_scan_path" || true
+                fi
+                return 1
+                ;;
+        esac
+        force_scan_path=$(jq -Rn --arg path "$force_scan_path" '$path') || force_scan_path='""'
+        force_guard 'checkout activity could not be verified' \
+            "file scan stopped at an unreadable entry: path=$force_scan_path"
+        return 0
+    }
+
+    # Checks shared by Git worktrees and colocated JJ workspaces: the
+    # registration's lock and in-progress operation state.
+    force_git_admin_is_guarded() {
+        if [ -e "$1/locked" ] || [ -L "$1/locked" ]; then
+            force_guard 'locked Git worktree is kept' "$1/locked present"
+            return 0
+        fi
+        if git_admin_operation_in_progress "$1"; then
+            force_guard 'Git operation in progress keeps checkout' "$admin_operation present"
+            return 0
+        fi
+        return 1
+    }
+
+    # The walk for nested repositories runs last,
+    # only for a checkout that every other check already allows.
+    force_contents_are_guarded() {
+        inspect_protected_containers "$1"
+        case "$?" in
+            0) force_guard 'nested repository is kept' "path=$protected_container_path" ;;
+            1) return 1 ;;
+            *) force_guard 'checkout contents could not be walked' 'nested repository walk failed' ;;
+        esac
+    }
+
+    finish_force_decision() {
+        force_decision=remove
+        force_reason='idle checkout is force-removed without saving'
+        if [ "$force_after_days" -gt 0 ]; then
+            force_detail="idle $(format_force_age "$((force_now - force_newest))") (newest activity: $force_newest_signal)"
+        else
+            force_detail='activity not checked'
+        fi
+        force_detail="$force_detail; discards: ${force_discards:-nothing unsaved}"
+    }
+
+    # Decides, for --force-remove-after, a non-primary Git worktree at $1
+    # (admin $2, HEAD $3) that the normal rules retain. Sets
+    # force_decision to remove, active, or guard, with force_reason and
+    # force_detail for the report.
+    evaluate_git_force() {
+        force_decision=guard
+        force_reason=
+        force_detail=
+        force_active=
+        force_newest=
+        force_newest_signal=
+        force_discards=
+        [ -n "${force_worker-}" ] || {
+            force_guard 'checkout activity could not be verified' 'temporary directory unavailable'
+            return 0
+        }
+        force_git_admin_is_guarded "$2" && return 0
+        if [ "$force_after_days" -gt 0 ]; then
+            if ! force_time=$(GIT_NO_LAZY_FETCH=1 git show -s --format=%ct "$3" 2>/dev/null) ||
+               ! is_epoch "$force_time" ||
+               ! force_reflog_time=$(newest_reflog_time "$2/logs/HEAD"); then
+                force_guard 'checkout activity could not be verified' 'HEAD commit or reflog is unreadable'
+                return 0
+            fi
+            if note_force_activity "$force_time" 'HEAD commit' ||
+               note_force_activity "$force_reflog_time" 'HEAD move'; then
+                force_decision=active
+                return 0
+            fi
+        fi
+        force_list=$sweep_tmp_dir/force-paths
+        # Staged, then unstaged, then untracked non-ignored paths. The index
+        # copy is newer than any entry, so no comparison reads content. A
+        # checkout without a root .gitignore borrows the primary's, as the
+        # disk proofs do.
+        if ! prepare_workspace_ignore "$1" ||
+           ! copy_git_probe_index "$2" ||
+           ! (cd "$1" &&
+                git_probe_index --work-tree=. diff-index --cached --name-only --no-renames -z HEAD &&
+                git_probe_index --work-tree=. diff-files --name-only --no-renames -z &&
+                git_probe_index --work-tree=. ls-files -z --others --exclude-standard) \
+                > "$force_list" 2>/dev/null ||
+           ! cleanup_gitignore_fallback; then
+            cleanup_gitignore_fallback || true
+            force_guard 'checkout activity could not be verified' 'changed and untracked files could not be listed'
+            return 0
+        fi
+        if [ "$force_after_days" -gt 0 ]; then
+            force_checkout_is_active "$1" "$force_list" && return 0
+        fi
+        force_contents_are_guarded "$1" && return 0
+        [ ! -s "$force_list" ] || force_discards='uncommitted changes'
+        if ! commit_is_durably_anchored "$3"; then
+            force_discards="${force_discards:+$force_discards; }HEAD $3 is on no branch"
+        fi
+        if [ -n "${admin_retirement_blocker-}" ]; then
+            force_discards="${force_discards:+$force_discards; }Git admin state ($admin_retirement_blocker)"
+        fi
+        finish_force_decision
+    }
+
+    # The same for a JJ workspace named $2 at $1 with `@` $3; $4 is 1 for a
+    # colocated workspace, whose Git registration must resolve.
+    evaluate_jj_force() {
+        force_decision=guard
+        force_reason=
+        force_detail=
+        force_active=
+        force_newest=
+        force_newest_signal=
+        force_discards='disk changes not yet snapshotted by JJ'
+        force_jj_admin=
+        force_jj_head=-
+        force_reflog_time=0
+        [ -n "${force_worker-}" ] || {
+            force_guard 'checkout activity could not be verified' 'temporary directory unavailable'
+            return 0
+        }
+        if [ "$4" -eq 1 ]; then
+            if ! force_jj_admin=$(registered_git_dir_for_worktree "$1") ||
+               ! jj_gitfile_is_bound "$1" "$force_jj_admin" ||
+               ! force_jj_head=$(git --git-dir="$force_jj_admin" rev-parse --verify HEAD 2>/dev/null); then
+                force_guard 'Git registration of the JJ workspace cannot be verified' "workspace=$2"
+                return 0
+            fi
+            force_git_admin_is_guarded "$force_jj_admin" && return 0
+            force_discards="$force_discards; Git registration $force_jj_admin"
+        fi
+        if ! force_conflict=$(jj --no-pager --ignore-working-copy -R "$1" log --no-graph -r "$3" \
+                -T 'if(conflict, "conflict")' 2>/dev/null); then
+            force_guard 'checkout activity could not be verified' "JJ commit $3 is unreadable"
+            return 0
+        fi
+        if [ -n "$force_conflict" ]; then
+            force_guard 'JJ working copy has unresolved conflicts' "workspace=$2; target=$3"
+            return 0
+        fi
+        if [ "$force_after_days" -gt 0 ]; then
+            # JJ rewrites working_copy/checkout whenever an operation updates
+            # this workspace's working copy.
+            force_checkout_time=0
+            if [ -e "$1/.jj/working_copy/checkout" ]; then
+                force_checkout_time=$(date -r "$1/.jj/working_copy/checkout" +%s 2>/dev/null) ||
+                    force_checkout_time=
+            fi
+            if ! force_time=$(GIT_NO_LAZY_FETCH=1 git show -s --format=%ct "$3" 2>/dev/null) ||
+               ! is_epoch "$force_time" || ! is_epoch "$force_checkout_time" ||
+               { [ -n "$force_jj_admin" ] &&
+                 ! force_reflog_time=$(newest_reflog_time "$force_jj_admin/logs/HEAD"); }; then
+                force_guard 'checkout activity could not be verified' 'JJ commit, working-copy state, or Git reflog is unreadable'
+                return 0
+            fi
+            if note_force_activity "$force_time" '@ commit' ||
+               note_force_activity "$force_checkout_time" 'JJ working-copy update' ||
+               note_force_activity "$force_reflog_time" 'Git HEAD move'; then
+                force_decision=active
+                return 0
+            fi
+        fi
+        force_list=$sweep_tmp_dir/force-paths
+        # Every file of `@`, then untracked non-ignored ones: without a
+        # snapshot JJ records no per-file state that sweep reads.
+        rm -f -- "$sweep_tmp_dir/force.index"
+        if ! prepare_workspace_ignore "$1" ||
+           ! GIT_INDEX_FILE=$sweep_tmp_dir/force.index GIT_NO_LAZY_FETCH=1 \
+                git --git-dir="$git_common_dir" read-tree "$3^{tree}" 2>/dev/null ||
+           ! (cd "$1" && GIT_INDEX_FILE=$sweep_tmp_dir/force.index GIT_OPTIONAL_LOCKS=0 \
+                git --git-dir="$git_common_dir" --work-tree=. -c core.fsmonitor=false \
+                    ls-files -z --cached --others --exclude-standard -- . ':(exclude,top).jj') \
+                > "$force_list" 2>/dev/null ||
+           ! cleanup_gitignore_fallback; then
+            cleanup_gitignore_fallback || true
+            force_guard 'checkout activity could not be verified' 'workspace files could not be listed'
+            return 0
+        fi
+        if [ "$force_after_days" -gt 0 ]; then
+            force_checkout_is_active "$1" "$force_list" && return 0
+        fi
+        force_contents_are_guarded "$1" && return 0
+        finish_force_decision
+    }
+
+    force_inspection_values='force_decision force_reason force_detail force_active
+        force_discards force_newest force_newest_signal force_prefetch_admin'
+
+    # While the GitHub queries run, start the force evaluation of the
+    # worktrees that the planning loop would inspect, under the same gates.
+    # Normal proofs still decide first; a result they leave unused is
+    # discarded, and a real run checks everything again before removal.
+    start_force_prefetch() {
+        [ -n "$force_worker" ] || return 0
+        force_prefetch_root=$(git rev-parse --show-toplevel 2>/dev/null) &&
+            force_prefetch_root=$(cd "$force_prefetch_root" 2>/dev/null && pwd -P) &&
+            git worktree list --porcelain > "$sweep_tmp_dir/force-prefetch-worktrees" ||
+            return 0
+        # The jobs start before the main inventory names the primary's root
+        # .gitignore, which a checkout without one borrows; the main
+        # inventory sets it again.
+        read_primary_worktree "$sweep_tmp_dir/force-prefetch-worktrees"
+        printf '\n' >> "$sweep_tmp_dir/force-prefetch-worktrees" || return 0
+        force_prefetch_first=1
+        force_prefetch_path=
+        force_prefetch_head=
+        force_prefetch_branch=
+        force_prefetch_skip=0
+        while IFS= read -r force_prefetch_line; do
+            case "$force_prefetch_line" in
+                '')
+                    if [ -n "$force_prefetch_path" ]; then
+                        if [ "$force_prefetch_first" -eq 1 ]; then
+                            force_prefetch_first=0
+                        elif [ "$force_prefetch_skip" -eq 0 ]; then
+                            prefetch_force_worktree
+                        fi
+                    fi
+                    force_prefetch_path=
+                    force_prefetch_head=
+                    force_prefetch_branch=
+                    force_prefetch_skip=0
+                    ;;
+                worktree\ \"*) force_prefetch_path=${force_prefetch_line#worktree }; force_prefetch_skip=1 ;;
+                worktree\ *) force_prefetch_path=${force_prefetch_line#worktree } ;;
+                HEAD\ *) force_prefetch_head=${force_prefetch_line#HEAD } ;;
+                branch\ refs/heads/*) force_prefetch_branch=${force_prefetch_line#branch refs/heads/} ;;
+                locked|locked\ *|prunable|prunable\ *) force_prefetch_skip=1 ;;
+            esac
+        done < "$sweep_tmp_dir/force-prefetch-worktrees"
+    }
+
+    prefetch_force_worktree() {
+        # Only the wait for GitHub is spare time; once both queries finish,
+        # each remaining worktree is decided within its own inspection.
+        kill -0 "$merged_pr_query" 2>/dev/null || kill -0 "$closed_pr_query" 2>/dev/null || return 0
+        case "$force_prefetch_path" in *"$(printf '\t')"*|*'"'*|*\\*) return 0 ;; esac
+        ! path_is_temporary "$force_prefetch_path" && [ -d "$force_prefetch_path" ] || return 0
+        force_prefetch_canonical=$(cd "$force_prefetch_path" 2>/dev/null && pwd -P) || return 0
+        [ "$force_prefetch_canonical" != "$force_prefetch_root" ] &&
+            [ ! -e "$force_prefetch_canonical/.jj" ] || return 0
+        start_inspection_job force "force:$force_prefetch_canonical" \
+            "$force_prefetch_head $force_prefetch_branch $force_prefetch_path" \
+            inspect_git_force_job "$force_prefetch_canonical" "$force_prefetch_head" || true
+    }
+
+    # Invoked through start_inspection_job.
+    # shellcheck disable=SC2329
+    inspect_git_force_job() {
+        force_decision=
+        force_reason=
+        force_detail=
+        force_active=
+        force_discards=
+        force_newest=
+        force_newest_signal=
+        force_prefetch_admin=
+        admin_retirement_blocker=
+        if inspect_git_identity "$1" && [ "$inspected_head" = "$2" ]; then
+            force_prefetch_admin=$inspected_git_admin
+            evaluate_git_force "$1" "$inspected_git_admin" "$2"
+        fi
+        # shellcheck disable=SC2086
+        save_inspection_values $force_inspection_values
+    }
+
+    # Prints `prefetched` when a force job runs for the worktree at $1, so
+    # that its inspection leaves the force decision to that job.
+    force_prefetch_hint() {
+        [ -n "$force_after_days" ] &&
+            find_inspection_job "force:$1" force "$head $worktree_branch $wt" &&
+            printf 'prefetched\n'
+    }
+
+    # Loads the prefetched force decision for the inspected worktree at $1
+    # when its proofs retain it, or decides serially when no matching
+    # result exists.
+    complete_git_force_decision() {
+        [ -n "$force_after_days" ] && [ "$sweep_phase" = planning ] &&
+            [ -z "$force_decision" ] || return 0
+        case "$git_proof_stage" in history|anchors|dirty) ;; *) return 0 ;; esac
+        force_prefetch_blocker=$admin_retirement_blocker
+        # shellcheck disable=SC2086
+        if find_inspection_job "force:$1" force "$head $worktree_branch $wt" &&
+           consume_inspection_job "$found_inspection_job" $force_inspection_values &&
+           [ "$force_prefetch_admin" = "$inspected_git_admin" ]; then
+            case "$force_decision" in
+                remove)
+                    if [ -n "$force_prefetch_blocker" ]; then
+                        force_discards="${force_discards:+$force_discards; }Git admin state ($force_prefetch_blocker)"
+                        finish_force_decision
+                    fi
+                    admin_retirement_blocker=$force_prefetch_blocker
+                    return 0
+                    ;;
+                active|guard)
+                    admin_retirement_blocker=$force_prefetch_blocker
+                    return 0
+                    ;;
+            esac
+        fi
+        admin_retirement_blocker=$force_prefetch_blocker
+        evaluate_git_force "$1" "$inspected_git_admin" "$head"
+    }
+
+    jj_git_registration_is_bound() {
+        [ "$(git_admin_backlink "$2" "${4-}")" = "$1/.git" ] &&
+            git_admin_has_expected_head "$2" "$3"
+    }
+
     jj_git_registration_is_retained() {
         [ "$(git_admin_backlink "$2" "${4-}")" = "$1/.git" ] &&
             git_admin_has_expected_head "$2" "$3" &&
@@ -3390,10 +3886,15 @@ EOF
             git_worktree_index_is_retained "$2" "$3"
     }
 
+    # A force removal needs the same identity, not the retained state.
     planned_jj_git_identity_is_safe() {
         if [ "$action_c" -eq 1 ]; then
-            jj_gitfile_is_bound "$action_path" "$action_e" &&
+            jj_gitfile_is_bound "$action_path" "$action_e" || return 1
+            if [ "$action_f" = force ]; then
+                jj_git_registration_is_bound "$action_path" "$action_e" "$action_d"
+            else
                 jj_git_registration_is_retained "$action_path" "$action_e" "$action_d"
+            fi
         else
             prove_path_absent_through_accessible_ancestor "$action_path/.git"
         fi
@@ -3472,9 +3973,12 @@ EOF
             # JJ may run a repo-wide Git prune if it still recognizes this as
             # a colocated worktree. Move only the bound registration and its
             # Gitfile out of the way, keeping both available for rollback.
-            jj_gitfile_is_bound "$action_quarantine" "$action_e" &&
-                jj_git_registration_is_retained "$action_path" "$action_e" "$action_d" missing ||
-                return 1
+            jj_gitfile_is_bound "$action_quarantine" "$action_e" || return 1
+            if [ "$action_f" = force ]; then
+                jj_git_registration_is_bound "$action_path" "$action_e" "$action_d" missing || return 1
+            else
+                jj_git_registration_is_retained "$action_path" "$action_e" "$action_d" missing || return 1
+            fi
             mv -- "$action_e" "$action_admin_backup/" &&
                 mv -- "$action_quarantine/.git" "$action_admin_backup/.git" &&
                 prove_path_absent_through_accessible_ancestor "$action_e" &&
@@ -3485,7 +3989,10 @@ EOF
             prove_path_absent_through_accessible_ancestor "$action_quarantine/.git" || return 1
         fi
 
-        if [ "$action_f" = disk ]; then
+        # A force removal discards the contents without a proof.
+        if [ "$action_f" = force ]; then
+            :
+        elif [ "$action_f" = disk ]; then
             if ! git_disk_tree_is_integrated "$action_quarantine" "$action_disk_seed" "$quarantine_git_dir"; then
                 action_failure="quarantined disk tree is no longer proven retained${disk_tree_blocker:+: $disk_tree_blocker}"
                 return 1
@@ -3501,9 +4008,12 @@ EOF
 
         prove_path_absent_through_accessible_ancestor "$action_path" || return 1
         if [ -n "$quarantine_git_dir" ]; then
-            git_admin_has_only_retained_state "$quarantine_git_dir" &&
-                [ "$(git --git-dir="$quarantine_git_dir" rev-parse --verify HEAD 2>/dev/null)" = "$action_d" ] &&
-                git_worktree_index_is_retained "$quarantine_git_dir" "$action_d" || return 1
+            [ "$(git --git-dir="$quarantine_git_dir" rev-parse --verify HEAD 2>/dev/null)" = "$action_d" ] ||
+                return 1
+            if [ "$action_f" != force ]; then
+                git_admin_has_only_retained_state "$quarantine_git_dir" &&
+                    git_worktree_index_is_retained "$quarantine_git_dir" "$action_d" || return 1
+            fi
         fi
         if ! verify_jj_workspace_identity "$action_quarantine" "$action_a" "$action_b" "$jj_root" "$action_path"; then
             action_failure='JJ workspace identity changed during quarantine'
@@ -3527,8 +4037,12 @@ EOF
            ! prove_path_absent_through_accessible_ancestor "$action_e"; then
             # Only the action-bound registration can affect this result.
             # An inaccessible dir or unverified replacement is a failure.
-            jj_git_registration_is_retained "$action_path" "$action_e" "$action_d" missing &&
-                rm -rf -- "$action_e" &&
+            if [ "$action_f" = force ]; then
+                jj_git_registration_is_bound "$action_path" "$action_e" "$action_d" missing || return 1
+            else
+                jj_git_registration_is_retained "$action_path" "$action_e" "$action_d" missing || return 1
+            fi
+            rm -rf -- "$action_e" &&
                 prove_path_absent_through_accessible_ancestor "$action_e" || return 1
         fi
     }
@@ -3536,7 +4050,14 @@ EOF
     remove_planned_jj_workspace() {
         verify_jj_workspace_identity "$action_path" "$action_a" "$action_b" &&
             planned_jj_git_identity_is_safe || return 1
-        if [ "$action_f" = disk ]; then
+        if [ "$action_f" = force ]; then
+            # Guards and activity are checked again instead of the proofs.
+            evaluate_jj_force "$action_path" "$action_a" "$action_b" "$action_c"
+            if [ "$force_decision" != remove ] || [ "$force_jj_admin" != "$action_e" ]; then
+                action_failure="checkout became active or guarded before removal: ${force_active:-$force_reason; $force_detail}"
+                return 1
+            fi
+        elif [ "$action_f" = disk ]; then
             if ! jj_workspace_disk_proof "$action_path" "$action_b" "$action_e"; then
                 action_failure="disk tree is no longer proven retained${disk_tree_blocker:+: $disk_tree_blocker}"
                 return 1
@@ -3688,7 +4209,9 @@ EOF
     # Git's own final cleanliness and identity checks still run. Point them
     # at the real registration and objects through a common directory with a
     # minimal config, so an intervening config edit cannot install a filter.
+    # `--force` as $1 is passed on to remove a checkout that is not clean.
     remove_clean_git_worktree() (
+        removal_force=${1-}
         removal_common=$sweep_tmp_dir/removal-common
         removal_gitdir=$(git rev-parse --absolute-git-dir) || exit 1
         removal_object_format=$(git rev-parse --show-object-format) || exit 1
@@ -3716,7 +4239,7 @@ EOF
             GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 \
             GIT_CONFIG_NOSYSTEM=1 GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 \
             GIT_COMMON_DIR="$removal_common" git --git-dir="$removal_gitdir" \
-            --work-tree="$current_git_root" "$@" worktree remove "$wt"
+            --work-tree="$current_git_root" "$@" worktree remove ${removal_force:+"$removal_force"} "$wt"
     )
 
     protect_git_containers() {
@@ -3759,34 +4282,81 @@ EOF
         : > "$unsafe_git_worktree_paths" || unsafe_git_worktree_paths=
         : > "$deferred_git_worktrees" || deferred_git_worktrees=
         : > "$accounted_deferred_git_worktrees" || accounted_deferred_git_worktrees=
-        load_closed_pr_heads
     fi
+    force_worker=
+    force_reference=
+    if [ -n "$force_after_days" ] && [ -n "$sweep_tmp_dir" ]; then
+        force_worker=$sweep_tmp_dir/force-worker
+        cat > "$force_worker" <<'FORCE_WORKER' || force_worker=
+            # Runs under xargs: $1 result directory, $2 checkout root, $3 the
+            # cutoff reference file, then paths relative to the root. Exit
+            # status 255 makes xargs stop reading, so nothing after the
+            # deciding entry is examined.
+            result=$1
+            root=$2
+            reference=$3
+            shift 3
+            newest=
+            if [ -f "$result/newest" ]; then
+                newest=$(cat "$result/newest" && printf .) || exit 255
+                newest=${newest%.}
+            fi
+            for path do
+                file=$root/$path
+                if [ -L "$file" ]; then
+                    # A symlink's own time, not its target's.
+                    found=$(find "$file" -prune -newer "$reference" -print) || {
+                        printf "%s" "$path" > "$result/error"
+                        exit 255
+                    }
+                    if [ -n "$found" ]; then
+                        printf "%s" "$path" > "$result/active"
+                        exit 255
+                    fi
+                elif [ -d "$file" ]; then
+                    # A directory, such as an untracked nested repository,
+                    # is left to the container walk; its time never counts.
+                    :
+                elif [ -e "$file" ]; then
+                    if [ "$file" -nt "$reference" ]; then
+                        printf "%s" "$path" > "$result/active"
+                        exit 255
+                    fi
+                    if [ -z "$newest" ] || [ "$file" -nt "$root/$newest" ]; then
+                        newest=$path
+                    fi
+                else
+                    # Deleted, or unreadable: a path is gone only when its
+                    # nearest existing ancestor is a searchable directory.
+                    parent=${file%/*}
+                    while [ -n "$parent" ] && [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+                        parent=${parent%/*}
+                    done
+                    if [ -z "$parent" ] || [ ! -d "$parent" ] || [ ! -r "$parent" ] || [ ! -x "$parent" ]; then
+                        printf "%s" "$path" > "$result/error"
+                        exit 255
+                    fi
+                fi
+            done
+            printf "%s" "$newest" > "$result/newest" || exit 255
+FORCE_WORKER
+        # A file whose modification time is the cutoff, for `-nt` tests.
+        if [ "$force_after_days" -gt 0 ] && [ "$force_cutoff" -gt 0 ]; then
+            force_reference=$sweep_tmp_dir/force-cutoff
+            force_stamp=$(date -u -r "$force_cutoff" +%Y%m%d%H%M.%S 2>/dev/null ||
+                date -u -d "@$force_cutoff" +%Y%m%d%H%M.%S 2>/dev/null) &&
+                TZ=UTC0 touch -t "$force_stamp" "$force_reference" &&
+                [ "$(date -r "$force_reference" +%s)" = "$force_cutoff" ] || force_reference=$sweep_tmp_dir/missing-force-cutoff
+        fi
+    fi
+    [ -z "$sweep_tmp_dir" ] || load_closed_pr_heads
 
     primary_gitignore_source=
     git_worktree_inventory=
     if [ -n "${sweep_tmp_dir-}" ]; then
         git_worktree_inventory=$sweep_tmp_dir/git-worktrees
         if git worktree list --porcelain > "$git_worktree_inventory"; then
-            primary_worktree_record=
-            IFS= read -r primary_worktree_record < "$git_worktree_inventory" || true
-            case "$primary_worktree_record" in
-                worktree\ /*)
-                    primary_worktree=${primary_worktree_record#worktree }
-                    case "$primary_worktree" in
-                        *"$(printf '\t')"*) ;;
-                        *)
-                            primary_worktree=$(cd "$primary_worktree" 2>/dev/null && pwd -P) ||
-                                primary_worktree=
-                            if [ -n "$primary_worktree" ] &&
-                               [ -f "$primary_worktree/.gitignore" ] &&
-                               [ ! -L "$primary_worktree/.gitignore" ] &&
-                               [ -r "$primary_worktree/.gitignore" ]; then
-                                primary_gitignore_source=$primary_worktree/.gitignore
-                            fi
-                            ;;
-                    esac
-                    ;;
-            esac
+            read_primary_worktree "$git_worktree_inventory"
         else
             git_worktree_inventory=
         fi
@@ -3907,12 +4477,37 @@ EOF
         git_proof_stage=clean
     }
 
+    # The proofs above, then, while planning with --force-remove-after,
+    # the force decision for a worktree they retain for its history,
+    # contents, or admin state. `prefetched` as $2 leaves that decision to
+    # the worktree's prefetched force job.
+    evaluate_git_worktree() {
+        force_decision=
+        force_reason=
+        force_detail=
+        force_active=
+        evaluate_git_worktree_proofs "$1"
+        [ -n "$force_after_days" ] && [ "$sweep_phase" = planning ] || return 0
+        case "$git_proof_stage" in
+            history|anchors) ;;
+            dirty)
+                if [ "$inspected_status_kind" = nested-repository ]; then
+                    force_guard 'nested repository is kept' "path=$inspected_status_example"
+                    return 0
+                fi
+                ;;
+            *) return 0 ;;
+        esac
+        [ "${2-}" != prefetched ] || return 0
+        evaluate_git_force "$1" "$inspected_git_admin" "$head"
+    }
+
     # Invoked through start_inspection_job.
     # shellcheck disable=SC2329
     inspect_git_worktree_job() {
         head=$2
         worktree_branch=$3
-        evaluate_git_worktree_proofs "$1"
+        evaluate_git_worktree "$1" "${4-}"
         # shellcheck disable=SC2086
         save_inspection_values $git_inspection_values
     }
@@ -3938,8 +4533,21 @@ EOF
         # The key names the registration (HEAD, branch, registered path), not
         # only the directory: the merged-PR proof depends on the branch, and a
         # second registration of the same directory must not reuse this result.
+        prefetch_force_hint=
+        if [ -n "$force_after_days" ] &&
+           find_inspection_job "force:$prefetch_canonical" force "$head $worktree_branch $wt"; then
+            # Only the proofs remain for this worktree, so it starts after
+            # the worktrees that may still need the long walk.
+            [ "$prefetch_git_round" = later ] || return 0
+            prefetch_force_hint=prefetched
+            # Both jobs may borrow the primary's .gitignore, never at once.
+            collect_inspection_job "$found_inspection_job" || true
+        elif [ "$prefetch_git_round" = later ]; then
+            return 0
+        fi
         start_inspection_job git "$prefetch_canonical" "$head $worktree_branch $wt" \
-            inspect_git_worktree_job "$prefetch_canonical" "$head" "$worktree_branch" || true
+            inspect_git_worktree_job "$prefetch_canonical" "$head" "$worktree_branch" \
+            ${prefetch_force_hint:+"$prefetch_force_hint"} || true
     }
 
     # Load a planning job's result for the worktree at $1. Returns 1 when no
@@ -3961,6 +4569,7 @@ EOF
             00|01|10|11) ;;
             *) return 1 ;;
         esac
+        case "$force_decision" in ''|remove|active|guard) ;; *) return 1 ;; esac
         case "$git_proof_stage" in
             identity) return 0 ;;
             head_changed) [ -n "$inspected_head" ] && [ "$inspected_head" != "$head" ]; return ;;
@@ -3974,6 +4583,95 @@ EOF
             dirty) [ -n "$inspected_status" ] ;;
             anchors|clean) [ -z "$inspected_status" ] ;;
         esac
+    }
+
+    # Reports the force decision for a checkout that the normal rules
+    # retain as category $1 at $2, for reason $3 with evidence $4 and
+    # registrations $5. A removal is queued as `$6 $2 $7...` in a real run.
+    report_force_decision() {
+        force_report_category=$1
+        force_report_path=$2
+        force_report_registrations=$5
+        force_report_normal="retained by the normal rules: $3; $4"
+        force_report_prefix="force-remove-after=$force_after_days"
+        case "$force_decision" in
+            remove)
+                force_report_evidence="$force_report_prefix: $force_detail; $force_report_normal"
+                if [ "$dry" -eq 1 ]; then
+                    report_checkout eligible "$force_report_path" "$force_reason" \
+                        "$force_report_evidence; would force-remove" "$force_report_registrations"
+                    return
+                fi
+                force_report_action=$6
+                shift 6
+                if queue_action "$force_report_action" "$force_report_path" "$@"; then
+                    report_checkout eligible "$force_report_path" "$force_reason" \
+                        "$force_report_evidence" "$force_report_registrations"
+                else
+                    report_checkout unverifiable "$force_report_path" 'Could not record prune action' \
+                        "$force_report_evidence" "$force_report_registrations"
+                fi
+                ;;
+            active)
+                report_checkout "$force_report_category" "$force_report_path" \
+                    'recently active checkout is kept' \
+                    "$force_report_prefix: $force_active; $force_report_normal" "$force_report_registrations"
+                ;;
+            *)
+                report_checkout "$force_report_category" "$force_report_path" "$force_reason" \
+                    "$force_report_prefix: $force_detail; $force_report_normal" "$force_report_registrations"
+                ;;
+        esac
+    }
+
+    # Reports a worktree that the normal rules retain; while planning with
+    # --force-remove-after, its force decision decides instead.
+    retain_git_worktree() {
+        if [ -z "$force_after_days" ] || [ "$sweep_phase" != planning ] || [ -z "$force_decision" ]; then
+            report_checkout "$1" "$wt" "$2" "$3" git
+            return
+        fi
+        report_force_decision "$1" "$wt" "$2" "$3" git \
+            force-git "$head" "$worktree_branch" "$inspected_git_admin"
+    }
+
+    # Executes a planned force removal. Identity, guards, and activity are
+    # checked again, then Git removes the worktree with --force; no proof
+    # of retained history or cleanliness is required.
+    force_remove_git_worktree() {
+        wt=$1
+        head=$2
+        canonical=$(cd "$wt" 2>/dev/null && pwd -P) || {
+            action_failure='checkout path cannot be canonicalized'
+            return 1
+        }
+        if is_invoking_checkout "$canonical" ||
+           ! inspect_git_identity "$canonical" ||
+           [ "$inspected_head" != "$head" ] || [ "$inspected_git_admin" != "$3" ] ||
+           ! prove_path_absent_through_accessible_ancestor "$canonical/.jj"; then
+            action_failure='Git worktree identity or HEAD changed before removal'
+            return 1
+        fi
+        admin_retirement_blocker=
+        evaluate_git_force "$canonical" "$inspected_git_admin" "$head"
+        if [ "$force_decision" != remove ]; then
+            action_failure="checkout became active or guarded before removal: ${force_active:-$force_reason; $force_detail}"
+            return 1
+        fi
+        if [ "$worktree_needs_repair" -eq 1 ]; then
+            echo "repair worktree metadata: $wt"
+            if ! git worktree repair "$wt" >/dev/null 2>&1 ||
+               ! inspect_git_identity "$canonical" ||
+               [ "$worktree_needs_repair" -ne 0 ] || [ "$inspected_head" != "$head" ]; then
+                action_failure='moved worktree metadata could not be safely repaired'
+                return 1
+            fi
+        fi
+        echo "force-remove worktree: $wt"
+        if ! remove_clean_git_worktree --force; then
+            action_failure='Git refused the forced worktree removal'
+            return 1
+        fi
     }
 
     process_git_worktree() {
@@ -4082,8 +4780,9 @@ EOF
         fi
         # Planning may already hold this result from a parallel inspection.
         if ! use_git_worktree_inspection "$canonical"; then
-            evaluate_git_worktree_proofs "$canonical"
+            evaluate_git_worktree "$canonical" "$(force_prefetch_hint "$canonical")"
         fi
+        [ "$git_proof_stage" = failed ] || complete_git_force_decision "$canonical"
         case "$git_proof_stage" in
             identity|unreadable)
                 report_checkout unverifiable "$wt" 'Git worktree identity or contents are unreadable' \
@@ -4096,13 +4795,13 @@ EOF
                 return
                 ;;
             dirty)
-                report_checkout protected "$wt" 'worktree contains tracked, non-ignored untracked, nested, or submodule state' \
-                    "HEAD=$head; blocker-kind=${inspected_status_kind:-unknown}; first-status-or-path=${inspected_status_example:-unavailable}" git
+                retain_git_worktree protected 'worktree contains tracked, non-ignored untracked, nested, or submodule state' \
+                    "HEAD=$head; blocker-kind=${inspected_status_kind:-unknown}; first-status-or-path=${inspected_status_example:-unavailable}"
                 return
                 ;;
             anchors)
-                report_checkout protected "$wt" 'Git worktree index or recovery anchors are not proven retained' \
-                    "${admin_retirement_blocker:-HEAD=$head; real index proof failed}" git
+                retain_git_worktree protected 'Git worktree index or recovery anchors are not proven retained' \
+                    "${admin_retirement_blocker:-HEAD=$head; real index proof failed}"
                 return
                 ;;
             history|clean) ;;
@@ -4114,25 +4813,25 @@ EOF
         esac
         if [ "$worktree_integrated" -ne 1 ]; then
             if [ "$remote_evidence_fresh" -ne 1 ]; then
-                report_checkout 'pending verification' "$wt" \
+                retain_git_worktree 'pending verification' \
                     'cached default branch could not be verified read-only' \
-                    "$worktree_failure" git
+                    "$worktree_failure"
             elif [ "$git_integration_check_safe" -ne 1 ]; then
-                report_checkout unverifiable "$wt" 'retained-history proof could not run safely' \
-                    "$worktree_failure" git
+                retain_git_worktree unverifiable 'retained-history proof could not run safely' \
+                    "$worktree_failure"
             elif [ -z "$worktree_branch" ]; then
-                report_checkout 'possible orphan' "$wt" 'detached Git worktree has unproven history' \
-                    "$worktree_failure" git
+                retain_git_worktree 'possible orphan' 'detached Git worktree has unproven history' \
+                    "$worktree_failure"
             elif [ "$(git for-each-ref --format='%(upstream:track)' \
                     "refs/heads/$worktree_branch" 2>/dev/null)" = '[gone]' ]; then
-                report_checkout 'possible orphan' "$wt" 'tracked upstream is gone; history is unproven' \
-                    "$worktree_failure" git
+                retain_git_worktree 'possible orphan' 'tracked upstream is gone; history is unproven' \
+                    "$worktree_failure"
             elif git_head_is_closed_pr "$worktree_branch" "$head"; then
-                report_checkout 'possible orphan' "$wt" 'closed-unmerged PR is an orphan signal only' \
-                    "$worktree_failure" git
+                retain_git_worktree 'possible orphan' 'closed-unmerged PR is an orphan signal only' \
+                    "$worktree_failure"
             else
-                report_checkout protected "$wt" 'Git worktree history is not proven retained' \
-                    "$worktree_failure" git
+                retain_git_worktree protected 'Git worktree history is not proven retained' \
+                    "$worktree_failure"
             fi
             return
         fi
@@ -4250,7 +4949,12 @@ EOF
 
     if [ -n "${git_worktree_inventory-}" ]; then
         # Start the read-only inspections that the serial pass consumes.
+        prefetch_git_round=first
         process_git_worktree_inventory prefetch_git_worktree < "$git_worktree_inventory"
+        if [ -n "$force_after_days" ]; then
+            prefetch_git_round=later
+            process_git_worktree_inventory prefetch_git_worktree < "$git_worktree_inventory"
+        fi
         process_git_worktree_inventory process_git_worktree < "$git_worktree_inventory"
         wait_for_inspection_jobs
     else
@@ -4490,23 +5194,49 @@ EOF
         esac
     }
 
+    # Reports the JJ workspace at $canonical, retained by the normal rules
+    # as category $1 for reason $2 with evidence $3 at `@` $4. While
+    # planning with --force-remove-after its force decision decides
+    # instead; `container` as $5 marks a nested repository
+    # that the normal rules already found.
+    retain_jj_workspace() {
+        if [ -z "$force_after_days" ] || [ "$sweep_phase" != planning ]; then
+            report_checkout "$1" "$canonical" "$2" "$3" "$jj_registrations"
+            return
+        fi
+        force_jj_is_git=0
+        if [ -e "$canonical/.git" ] || [ -L "$canonical/.git" ] || [ "$jj_registrations" = 'git,jj' ]; then
+            force_jj_is_git=1
+        fi
+        force_active=
+        force_jj_admin=
+        force_jj_head=-
+        if [ "${5-}" = container ]; then
+            force_guard 'nested repository is kept' "path=$jj_extra_content_path"
+        else
+            evaluate_jj_force "$canonical" "$jj_name" "$4" "$force_jj_is_git"
+        fi
+        report_force_decision "$1" "$canonical" "$2" "$3" "$jj_registrations" \
+            jj "$jj_name" "$4" "$force_jj_is_git" "$force_jj_head" "$force_jj_admin" force
+    }
+
     # Report a JJ `@` whose retained history is not proven.
     report_jj_history_failure() {
         protect_closed_heads_for_tip "$jj_root" "$2" || true
         if [ "$remote_evidence_fresh" -ne 1 ]; then
             closed_cleanup_safe=0
-            report_checkout 'pending verification' "$1" \
+            retain_jj_workspace 'pending verification' \
                 'JJ retained-history proof awaits fresh default-branch evidence' \
-                "$jj_integration_failure" "$jj_registrations"
+                "$jj_integration_failure" "$2"
         elif [ "$jj_integration_check_safe" -ne 1 ]; then
             closed_cleanup_safe=0
-            report_checkout unverifiable "$1" \
+            retain_jj_workspace unverifiable \
                 'JJ retained-history proof could not run safely' \
-                "$jj_integration_failure" "$jj_registrations"
+                "$jj_integration_failure" "$2"
         else
-            report_checkout 'possible orphan' "$1" \
+            retain_jj_workspace 'possible orphan' \
                 'JJ workspace history is not proven retained' \
-                "$jj_integration_failure" "$jj_registrations"
+                "$jj_integration_failure" "$2"
         fi
     }
 
@@ -4730,9 +5460,10 @@ EOF
                             ;;
                         registration)
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
-                            report_checkout protected "$canonical" \
+                            retain_jj_workspace protected \
                                 'JJ/Git registration, HEAD, or index is not proven safe' \
-                                "${admin_retirement_blocker:+$admin_retirement_blocker; }workspace=$jj_name; target=$listed_jj_tip" "$jj_registrations"
+                                "${admin_retirement_blocker:+$admin_retirement_blocker; }workspace=$jj_name; target=$listed_jj_tip" \
+                                "$listed_jj_tip"
                             continue
                             ;;
                         disk) ;;
@@ -4747,8 +5478,8 @@ EOF
                     esac
                     if [ -n "$disk_tree_blocker" ]; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
-                        report_checkout protected "$canonical" 'JJ disk proof refused unsafe content' \
-                            "$disk_tree_blocker; workspace=$jj_name; target=$listed_jj_tip" "$jj_registrations"
+                        retain_jj_workspace protected 'JJ disk proof refused unsafe content' \
+                            "$disk_tree_blocker; workspace=$jj_name; target=$listed_jj_tip" "$listed_jj_tip"
                         continue
                     fi
                     if [ "$disk_proof_ok" -eq 1 ] &&
@@ -4777,10 +5508,10 @@ EOF
                     # authorize stale-workspace repair or any cleanup action.
                     if [ "$dry" -eq 1 ] && [ "$update_snapshot" -ne 1 ]; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
-                        report_checkout 'pending verification' "$canonical" \
+                        retain_jj_workspace 'pending verification' \
                             'dry-run cannot snapshot the JJ working copy; retry with --dry-run --update-snapshot' \
                             "workspace=$jj_name; target=$listed_jj_tip; pending snapshot; opt-in may update JJ commits/operations and working-copy file structure" \
-                            "$jj_registrations"
+                            "$listed_jj_tip"
                         continue
                     fi
 
@@ -4789,10 +5520,12 @@ EOF
                     case "$jj_extra_status" in
                         0)
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
-                            report_checkout protected "$canonical" \
+                            jj_extra_container=
+                            [ "$jj_extra_content_kind" != nested-repository ] || jj_extra_container=container
+                            retain_jj_workspace protected \
                                 'JJ workspace contains non-ignored untracked or nested files' \
                                 "workspace=$jj_name; target=$listed_jj_tip; first-filesystem-only-path=$jj_extra_content_path; kind=$jj_extra_content_kind" \
-                                "$jj_registrations"
+                                "$listed_jj_tip" ${jj_extra_container:+"$jj_extra_container"}
                             continue
                             ;;
                         1) ;;
@@ -4853,8 +5586,8 @@ EOF
                                 workspace_disk_evidence=$disk_tree_evidence
                             else
                                 protect_closed_heads_for_tip "$jj_root" "$jj_tip"
-                                report_checkout protected "$canonical" 'JJ/Git workspace is dirty' \
-                                    "workspace=$jj_name; target=$jj_tip" "$jj_registrations"
+                                retain_jj_workspace protected 'JJ/Git workspace is dirty' \
+                                    "workspace=$jj_name; target=$jj_tip" "$jj_tip"
                                 continue
                             fi
                         fi
@@ -4878,6 +5611,22 @@ EOF
                                 "workspace=$jj_name; listed=$listed_jj_tip; live=$jj_before" \
                                 "$jj_registrations"
                             continue
+                        fi
+                        if [ -n "$force_after_days" ] && [ "$dry" -ne 1 ]; then
+                            # The snapshot rewrites `@` and its working-copy
+                            # state, which would read as fresh activity, so
+                            # an idle workspace is decided before it.
+                            force_active=
+                            force_jj_admin=
+                            force_jj_head=-
+                            evaluate_jj_force "$canonical" "$jj_name" "$jj_before" 0
+                            if [ "$force_decision" = remove ]; then
+                                protect_closed_heads_for_tip "$jj_root" "$jj_before" || true
+                                retain_jj_workspace 'possible orphan' \
+                                    'native JJ workspace is idle; snapshot skipped' \
+                                    "workspace=$jj_name; target=$jj_before" "$jj_before"
+                                continue
+                            fi
                         fi
                         snapshot_jj_workspace "$jj_path" "$jj_name" "$jj_before"
                         snapshot_status=$?
@@ -4925,8 +5674,8 @@ EOF
                             }
                         elif [ "$jj_before" != "$jj_tip" ]; then
                             protect_closed_heads_for_tip "$jj_root" "$jj_tip"
-                            report_checkout protected "$canonical" 'JJ snapshot found working-copy changes' \
-                                "workspace=$jj_name; listed=$jj_before; live=$jj_tip" "$jj_registrations"
+                            retain_jj_workspace protected 'JJ snapshot found working-copy changes' \
+                                "workspace=$jj_name; listed=$jj_before; live=$jj_tip" "$jj_tip"
                             continue
                         fi
                     fi
@@ -4976,10 +5725,12 @@ EOF
                     case "$jj_final_extra_status" in
                         0)
                             protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip" || true
-                            report_checkout protected "$canonical" \
+                            jj_extra_container=
+                            [ "$jj_extra_content_kind" != nested-repository ] || jj_extra_container=container
+                            retain_jj_workspace protected \
                                 'JJ workspace gained local content before removal' \
                                 "workspace=$jj_name; target=$workspace_jj_tip; first-filesystem-only-path=$jj_extra_content_path; kind=$jj_extra_content_kind" \
-                                "$jj_registrations"
+                                "$workspace_jj_tip" ${jj_extra_container:+"$jj_extra_container"}
                             continue
                             ;;
                         1) ;;

@@ -85,6 +85,8 @@ checkouts require retained-work evidence and checkout safety checks. It does not
 git sweep --dry-run  # fetch remote history and preview cleanup
 git sweep --dry-run --update-snapshot  # permit JJ snapshot verification; no cleanup
 git sweep           # refresh evidence, recheck candidates, and clean up
+git sweep --dry-run --force-remove-after  # also preview removing kept checkouts idle for 7 days
+git sweep --force-remove-after=14  # also remove kept checkouts idle for 14 days
 git sweep help
 ```
 
@@ -257,6 +259,65 @@ closed PRs concurrently, starting with a limit of 1,000 each. A query whose
 result reaches its limit repeats with twice the limit; at the 64,000-PR ceiling,
 completeness stays unverified. Closed-unmerged PRs remain report-only. Preview is
 selected with `--dry-run`; there are no sweep-specific environment settings.
+
+### Removing idle checkouts
+
+`--force-remove-after[=N]` also removes checkouts that the rules above retain,
+once they have been idle for at least N days; N defaults to 7. It applies to
+non-primary Git worktrees and to colocated and native JJ workspaces. Checkouts the
+normal rules prune are pruned as before. N must be a non-negative whole number
+attached with `=`; a negative or non-numeric value, or N as a separate argument,
+is a usage error. Add `--dry-run` to preview. Without the flag, behavior and
+output are unchanged.
+
+Activity is checked cheapest first against a cutoff of N days before now. The
+first signal newer than the cutoff keeps the checkout, and the report names that
+signal and its age; no later signal is read.
+
+1. The committer time of the Git HEAD or JJ `@` commit.
+2. The last HEAD move: the newest timestamp recorded inside the worktree's
+   `logs/HEAD`, not the file's own time. For a JJ workspace, this is the time of
+   `.jj/working_copy/checkout`, which JJ rewrites whenever an operation updates
+   that working copy. A colocated workspace also checks its Git `logs/HEAD`.
+3. Changed files: staged, modified, deleted, and untracked non-ignored paths,
+   examined one at a time. The scan stops at the first file newer than the
+   cutoff, so later paths are never read. Without a snapshot, JJ records no
+   per-file state that sweep reads, so a JJ workspace has every file of `@` and
+   its untracked non-ignored files scanned.
+
+The index file's time, directory times, and ignored files never count. A
+deletion or rename leaves no newer file behind, so a checkout whose only recent
+work is deleting or renaming files reads as idle. A path
+that cannot be examined keeps the checkout as unverifiable. With `=0`, sweep skips
+the activity check.
+
+Some checkouts are kept whatever their age:
+
+- the primary checkout and the checkout sweep runs from;
+- locked Git worktrees;
+- checkouts with an operation in progress: `MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+  `REVERT_HEAD`, `BISECT_LOG`, `rebase-merge/`, `rebase-apply/`, or `sequencer/`
+  in the worktree's Git admin directory, or a JJ `@` with unresolved conflicts;
+- checkouts holding a nested repository, found by the same walk that
+  normal runs use; to save time, the walk runs only for an idle checkout;
+- checkouts whose identity, registration, history, or files cannot be verified,
+  including quoted or delimiter-bearing paths and missing registrations.
+
+Temporary registrations keep the temporary-registration policy.
+
+A force removal saves nothing: sweep creates no archive refs. A Git worktree is
+removed with `git worktree remove --force`. A JJ workspace goes through the
+existing quarantine, `jj workspace forget`, and interruption rollback, without the
+integration and cleanliness proofs. Uncommitted and unsnapshotted changes, a
+detached HEAD that no branch contains, and the worktree's Git admin state, such
+as its reflog, are discarded. Branches and bookmarks are not removed with the
+checkout, but once no checkout holds one, the existing branch and stack cleanup
+rules apply in the same run, so a branch already merged into the default branch
+is deleted as usual. The report shows the idle age,
+the newest activity, what is discarded, and the normal rule that retained the
+checkout. A real run checks the guards and activity again just before each
+removal and keeps a checkout that has become active or guarded. Force-removed
+checkouts count as pruned source trees.
 
 ## About
 
