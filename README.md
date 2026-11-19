@@ -119,7 +119,13 @@ alone do not authorize removal. A JJ commit message does not prevent removal:
 described commits undergo the same integration and safety checks as other commits.
 Evidence can include ancestry, exact historical-tree equality, a validated merged
 PR with the exact head SHA, or an isolated conflict-free merge that reproduces the
-default tree. A merged PR is valid when it comes from this repository and its
+default tree. When that merge conflicts or changes content, for example because
+the default branch rewrote the same lines after a squash merge, sweep tries each
+earlier first-parent default commit after the merge base, oldest first. Merging
+the checkout into that commit with the same merge base must reproduce exactly
+that commit's tree; each such commit passes the same attribute and merge-driver
+checks as the default tip, and the evidence names the commit that matched.
+A merged PR is valid when it comes from this repository and its
 merge commit is reachable from the default tip; its recorded base branch name is
 not compared, so PRs merged before a default-branch rename still count.
 Patch-ID equality alone is insufficient.
@@ -154,7 +160,14 @@ retained Git HEAD. Plain Git worktree removal and colocated JJ retirement apply
 the same admin-directory allowlist. In-progress merge, rebase, cherry-pick, or
 bisect metadata, `config.worktree`, `locked`, per-worktree refs, and reflogs
 other than `logs/HEAD` block retirement. An `ORIG_HEAD` is allowed when it
-names a commit reachable from the verified default tip. A `COMMIT_EDITMSG` is
+names a commit reachable from the verified default tip. Leftovers that hold
+nothing unique are allowed too: an empty `MERGE_RR`, an `AUTO_MERGE` naming a
+tree while no merge, cherry-pick, revert, bisect, rebase, or sequencer operation
+is in progress, and any other top-level file whose whole content is one full
+commit ID that a durable ref (defined below) contains, such as an `ORIG_HEAD`
+on a local branch, a tool's `CLAUDE_BASE`, or a stale `REBASE_HEAD`.
+`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_*`, and a
+`REBASE_HEAD` beside `rebase-merge/` or `rebase-apply/` always block. A `COMMIT_EDITMSG` is
 allowed only when, after discarding everything from a verbose commit's scissors
 line onward and stripping comments, it is empty or equals the full message of
 HEAD or of a commit recorded in `logs/HEAD`; any other draft blocks retirement. An
@@ -191,7 +204,8 @@ would change the default tree is reported separately.
 Tracked changes and non-ignored untracked files prevent removal. Ordinary
 files matched by ignore rules, including test caches and generated assets, do not
 block cleanup and are removed with an otherwise eligible checkout. Nested
-repositories and submodules remain protected even when ignored.
+repositories and submodules remain protected even when ignored; folders named
+`node_modules` are not searched for them.
 Content-blocker evidence names a sampled path so you can inspect retained work.
 When a checkout lacks its root `.gitignore`, every mode, including dry-run,
 temporarily uses the primary checkout's file for verification and then removes

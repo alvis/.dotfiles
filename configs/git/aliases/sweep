@@ -9,7 +9,8 @@
 #      - it is an ancestor of the default branch (old default-branch history),
 #      - it has zero net change from its merge base,
 #      - its exact tree exists in default history,
-#      - a guarded isolated merge produces the exact default tree, or
+#      - a guarded isolated merge produces the exact default tree, or the
+#        exact tree of an earlier first-parent default commit, or
 #      - its exact SHA identifies a same-repository merged PR whose merge commit
 #        is reachable from the default tip.
 # 3. Query GitHub once and build a validated, same-repository PR-head ledger.
@@ -119,6 +120,16 @@ f() {
         GIT_SHALLOW_FILE; do
         unset "$git_local_env"
     done
+    # With log.showSignature, signature checks print ahead of every
+    # `git show`/`git log` format line parsed here. Turn it off for every Git
+    # call, after any configuration the caller already passes this way.
+    git_config_index=${GIT_CONFIG_COUNT:-0}
+    case "$git_config_index" in ''|*[!0123456789]*) git_config_index=0 ;; esac
+    eval "GIT_CONFIG_KEY_$git_config_index=log.showSignature" \
+        "GIT_CONFIG_VALUE_$git_config_index=false"
+    export "GIT_CONFIG_KEY_$git_config_index" "GIT_CONFIG_VALUE_$git_config_index"
+    GIT_CONFIG_COUNT=$((git_config_index + 1))
+    export GIT_CONFIG_COUNT
 
     usage() {
         printf '%s\n' \
@@ -492,6 +503,7 @@ f() {
     git_virtual_merge_is_noop() {
         virtual_tip=$1
         virtual_merge_reason=
+        virtual_merge_commit=
 
         [ -n "${virtual_object_dir-}" ] || {
             virtual_merge_reason='temporary object isolation unavailable'
@@ -656,7 +668,8 @@ f() {
             virtual_conflicts=$(jq -r '"paths=" + (.paths | length | tostring) + "; sample=" + (.paths[:3] | tojson)' \
                 "$virtual_parsed") || return 2
             virtual_merge_reason="virtual merge conflicts: $virtual_conflicts"
-            return 1
+            git_virtual_merge_earlier_default
+            return
         fi
         virtual_result=$(jq -r '.tree' "$virtual_parsed") || return 2
         virtual_default_tree=$(git rev-parse --verify "$default_tip^{tree}" 2>/dev/null) || {
@@ -667,7 +680,299 @@ f() {
             return 0
         fi
         virtual_merge_reason='virtual merge is conflict-free but adds or changes content'
+        git_virtual_merge_earlier_default
+    }
+
+    # The tip merge also fails when the default branch changed the same lines
+    # again after integrating the checkout. Merging the tip candidate into an
+    # earlier first-parent default commit M, with the same merge base, then
+    # reproduces exactly M's tree. Only commits that descend from the base
+    # qualify, so the base stays their single merge base; the tip's guards
+    # passed already and the per-commit attribute guards run here. Returns
+    # like git_virtual_merge_is_noop and sets virtual_merge_commit to the
+    # oldest proven M.
+    #
+    # A conflicted merge writes dozens of throwaway objects, so candidates
+    # are screened first. Outside the paths the tip candidate changed, the
+    # merge keeps M's content, so M can qualify only when each such path
+    # equals the candidate's version, or differs from the base and a
+    # content merge of that path alone yields M's version. Path versions
+    # are tracked along the first-parent chain, content merges are cached
+    # per blob triple, and a renamed path is not followed. A candidate that
+    # passes the screen still needs the full isolated merge to equal its
+    # tree, so the screen can only skip evidence, never create it.
+    git_virtual_merge_earlier_default() {
+        virtual_merge_commit=
+        earlier_tip_reason=$virtual_merge_reason
+        earlier_dir=$sweep_tmp_dir/virtual-earlier
+        mkdir -p "$earlier_dir" || return 2
+        if ! GIT_NO_LAZY_FETCH=1 git rev-list --first-parent --reverse \
+                "$virtual_base..$default_tip" > "$earlier_dir/chain" 2>/dev/null ||
+           ! GIT_NO_LAZY_FETCH=1 git rev-list --ancestry-path \
+                "$virtual_base..$default_tip" > "$earlier_dir/descendants" 2>/dev/null ||
+           ! awk -v tip="$default_tip" '
+                FILENAME == ARGV[1] { descendant[$0] = 1; next }
+                descendant[$0] && $0 != tip
+            ' "$earlier_dir/descendants" "$earlier_dir/chain" > "$earlier_dir/candidates"; then
+            virtual_merge_reason="$earlier_tip_reason; earlier default commits could not be listed"
+            return 2
+        fi
+        earlier_count=$(awk 'END { print NR }' "$earlier_dir/candidates") || return 2
+        [ "$earlier_count" -gt 0 ] || return 1
+        earlier_first=$(sed -n '1p' "$earlier_dir/candidates")
+        earlier_last=$(sed -n '$p' "$earlier_dir/candidates")
+
+        # Candidate trees, and each later candidate's first-parent changes.
+        # The log lists exactly the candidates after the first, oldest first.
+        # jq, not shell, expands these variables.
+        # shellcheck disable=SC2016
+        earlier_log_jq='def log_commits:
+            split("\u0000") |
+            if length == 0 then [] elif .[-1] == "" then .[:-1] else error("unterminated log") end |
+            reduce .[] as $field ({commits: [], meta: null};
+                if .meta != null then .commits[-1].changes += [{path: $field, meta: .meta}] | .meta = null
+                elif ($field | test("^([0-9a-f]{40}|[0-9a-f]{64})$")) then .commits += [{commit: $field, changes: []}]
+                elif ($field | ltrimstr("\n") | startswith(":")) and (.commits | length) > 0 then
+                    .meta = ($field | ltrimstr("\n") | ltrimstr(":") | split(" ")) |
+                    if (.meta | length) != 5 then error("malformed log record") else . end
+                else error("unexpected log field") end) |
+            if .meta != null then error("dangling log record") else .commits end;'
+        if ! sed 's/$/^{tree}/' "$earlier_dir/candidates" |
+            GIT_NO_LAZY_FETCH=1 git cat-file --batch-check='%(objectname) %(objecttype)' \
+                > "$earlier_dir/trees.raw" 2>/dev/null ||
+           ! awk 'FILENAME == ARGV[1] { commit[FNR] = $0; total = FNR; next }
+                NF != 2 || $2 != "tree" || !(FNR in commit) { exit 1 }
+                { print commit[FNR] " " $1; count = FNR }
+                END { if (count != total) exit 1 }
+            ' "$earlier_dir/candidates" "$earlier_dir/trees.raw" > "$earlier_dir/trees" ||
+           ! GIT_NO_LAZY_FETCH=1 git log --reverse --first-parent --diff-merges=first-parent \
+                --no-renames --no-abbrev --raw -z --format=%H \
+                "$earlier_first..$earlier_last" > "$earlier_dir/log" 2>/dev/null; then
+            virtual_merge_reason="$earlier_tip_reason; earlier default commits are unavailable locally"
+            return 2
+        fi
+
+        # The tip guard rejected versioned attributes in the tip, so checking
+        # against the tip resolves the non-versioned ones, which depend only
+        # on the path. One check covers every path any candidate holds: the
+        # first candidate's tree plus each later change. A candidate holding
+        # an attributes file or a path whose effective merge driver is
+        # custom cannot serve as evidence.
+        if ! { GIT_NO_LAZY_FETCH=1 git ls-tree -r -z --name-only "$earlier_first" &&
+               jq -Rjs "$earlier_log_jq"' log_commits | map(.changes[].path + "\u0000") | add // ""' \
+                   "$earlier_dir/log"; } > "$earlier_dir/paths.raw" 2>/dev/null ||
+           ! jq -Rjs 'split("\u0000") | map(select(length > 0)) | unique |
+                map(. + "\u0000") | add // ""' "$earlier_dir/paths.raw" > "$earlier_dir/paths" ||
+           ! GIT_INDEX_FILE=$sweep_tmp_dir/virtual-attributes.index GIT_NO_LAZY_FETCH=1 \
+                git check-attr --source="$default_tip" -z --stdin merge \
+                < "$earlier_dir/paths" > "$earlier_dir/attributes" 2>/dev/null ||
+           ! jq -Rcs '
+                split("\u0000") | if .[-1] == "" then .[:-1] else error("unterminated attribute output") end |
+                . as $parts | if length % 3 != 0 then error("malformed attribute output") else
+                    [range(0; length; 3) as $i |
+                     if $parts[$i + 1] != "merge" then error("unexpected attribute") else
+                         select(($parts[$i] | split("/") | last) == ".gitattributes" or
+                             (["unspecified", "set", "unset", "text", "binary", "union"] |
+                              index($parts[$i + 2])) == null) |
+                         {path: $parts[$i], driver: $parts[$i + 2]}
+                     end]
+                end' "$earlier_dir/attributes" > "$earlier_dir/blockers"; then
+            virtual_merge_reason="$earlier_tip_reason; earlier default attributes could not be inspected read-only"
+            return 2
+        fi
+        earlier_blocker=
+        if [ "$(cat "$earlier_dir/blockers")" = '[]' ]; then
+            cp -- "$earlier_dir/trees" "$earlier_dir/usable" || return 2
+        else
+            # Look up each blocking path in each candidate in one batch.
+            if ! jq -nrj --rawfile trees "$earlier_dir/trees" --slurpfile blockers "$earlier_dir/blockers" '
+                    $trees | split("\n")[] | select(length > 0) | split(" ")[0] as $commit |
+                    $blockers[0][] | $commit + ":" + .path + "\u0000"
+                ' > "$earlier_dir/lookups" ||
+               ! GIT_NO_LAZY_FETCH=1 git cat-file --batch-check='%(objecttype)' -Z \
+                    < "$earlier_dir/lookups" > "$earlier_dir/lookups.found" 2>/dev/null ||
+               ! jq -nc --rawfile trees "$earlier_dir/trees" --slurpfile blockers "$earlier_dir/blockers" \
+                    --rawfile found "$earlier_dir/lookups.found" '
+                    $blockers[0] as $paths |
+                    ($trees | split("\n") | map(select(length > 0))) as $candidates |
+                    ($found | split("\u0000") |
+                        if .[-1] == "" then .[:-1] else error("unterminated lookup output") end) as $found |
+                    if ($found | length) != (($candidates | length) * ($paths | length))
+                    then error("incomplete lookup output") else
+                        [range(0; $candidates | length) as $c |
+                         [range(0; $paths | length) as $p |
+                          select($found[$c * ($paths | length) + $p] | endswith(" missing") | not) |
+                          $paths[$p]] as $hits |
+                         {candidate: $candidates[$c], hit: $hits[0]}] |
+                        {usable: map(select(.hit == null) | .candidate),
+                         blocker: (map(select(.hit != null)) | first |
+                             if . == null then "" else
+                                 "earlier default commit " + (.candidate | split(" ")[0]) + ": " +
+                                 (if (.hit.path | split("/") | last) == ".gitattributes"
+                                  then "versioned merge attributes: path=" + (.hit.path | tojson)
+                                  else "custom merge driver selected: path=" + (.hit.path | tojson) +
+                                      "; driver=" + (.hit.driver | tojson) end)
+                             end)}
+                    end' > "$earlier_dir/lookups.json" ||
+               ! jq -r '.usable[]' "$earlier_dir/lookups.json" > "$earlier_dir/usable" ||
+               ! earlier_blocker=$(jq -r '.blocker' "$earlier_dir/lookups.json"); then
+                virtual_merge_reason="$earlier_tip_reason; earlier default attributes could not be inspected read-only"
+                return 2
+            fi
+        fi
+
+        # Screen the usable candidates. The plan lists, oldest first, each
+        # candidate that can still qualify ("C commit tree") and the content
+        # merges it needs ("M ours base theirs").
+        if ! GIT_NO_LAZY_FETCH=1 git diff-tree -r --no-renames --no-abbrev --raw -z \
+                "$virtual_base" "$virtual_tip" > "$earlier_dir/changes" 2>/dev/null ||
+           ! jq -Rrj --arg first "$earlier_first" '
+                split("\u0000") | if length == 0 then [] elif .[-1] == "" then .[:-1] else error("unterminated diff") end |
+                [range(1; length; 2) as $i | .[$i]] | map($first + ":" + . + "\u0000") | add // ""
+            ' "$earlier_dir/changes" > "$earlier_dir/start.lookups" ||
+           ! GIT_NO_LAZY_FETCH=1 git cat-file --batch-check='%(objectmode) %(objectname)' -Z \
+                < "$earlier_dir/start.lookups" > "$earlier_dir/start" 2>/dev/null ||
+           ! jq -nr --rawfile changes "$earlier_dir/changes" --rawfile start "$earlier_dir/start" \
+                --rawfile log "$earlier_dir/log" --rawfile usable "$earlier_dir/usable" \
+                --rawfile candidates "$earlier_dir/candidates" "$earlier_log_jq"'
+                def nul_fields: if length == 0 then [] elif .[-1] == "" then .[:-1] else error("unterminated output") end;
+                def version($mode; $oid): if $mode == "000000" then "000000 missing" else $mode + " " + $oid end;
+                def regular: test("^100(644|755) [0-9a-f]+$");
+                ($changes | split("\u0000") | nul_fields) as $fields |
+                if ($fields | length) % 2 != 0 then error("malformed diff") else
+                [range(0; $fields | length; 2) as $i |
+                 ($fields[$i] | ltrimstr(":") | split(" ")) as $meta |
+                 if ($meta | length) != 5 then error("malformed diff record") else
+                     {path: $fields[$i + 1], base: version($meta[0]; $meta[2]), tip: version($meta[1]; $meta[3])}
+                 end] as $paths |
+                ($paths | to_entries | map({key: .value.path, value: .key}) | from_entries) as $index |
+                ($start | split("\u0000") | nul_fields |
+                    map(if endswith(" missing") then "000000 missing" else . end)) as $first |
+                ($candidates | split("\n") | map(select(length > 0))) as $all |
+                ($usable | split("\n") | map(select(length > 0) | split(" ") | {key: .[0], value: .[1]}) |
+                    from_entries) as $trees |
+                ($log | log_commits) as $commits |
+                if ($first | length) != ($paths | length) then error("incomplete path lookup")
+                elif ($commits | map(.commit)) != $all[1:] then error("log does not match candidates")
+                else
+                    reduce range(0; $all | length) as $c ({state: $first, plan: []};
+                        (if $c == 0 then . else
+                            reduce $commits[$c - 1].changes[] as $change (.;
+                                if $index[$change.path] == null then .
+                                else .state[$index[$change.path]] = version($change.meta[1]; $change.meta[3]) end)
+                         end) |
+                        if $trees[$all[$c]] == null then . else
+                            .state as $state |
+                            [range(0; $paths | length) as $p | $state[$p] as $ours | $paths[$p] as $path |
+                             if $ours == $path.tip then empty
+                             elif $ours == $path.base then "skip"
+                             elif ($ours | regular) and ($path.base | regular) and ($path.tip | regular) and
+                                  (($path.base | split(" ")[0]) == ($path.tip | split(" ")[0]) or
+                                   ($ours | split(" ")[0]) == ($path.tip | split(" ")[0]))
+                             then "M " + ($ours | split(" ")[1]) + " " + ($path.base | split(" ")[1]) +
+                                 " " + ($path.tip | split(" ")[1])
+                             else "skip" end] as $merges |
+                            if ($merges | index("skip")) != null then .
+                            else .plan += ["C " + $all[$c] + " " + $trees[$all[$c]]] + ($merges | unique) end
+                        end) | .plan[]
+                end end' > "$earlier_dir/plan"; then
+            virtual_merge_reason="$earlier_tip_reason; earlier default candidates could not be screened"
+            return 2
+        fi
+
+        earlier_candidate=
+        earlier_candidate_ok=0
+        earlier_proven=
+        while :; do
+            if ! IFS=' ' read -r earlier_kind earlier_ours earlier_base earlier_theirs; then
+                earlier_kind=end
+            fi
+            case "$earlier_kind" in
+                C|end)
+                    if [ -n "$earlier_candidate" ] && [ "$earlier_candidate_ok" -eq 1 ]; then
+                        git_virtual_merge_matches_tree "$earlier_candidate" "$earlier_candidate_tree"
+                        earlier_match=$?
+                        [ "$earlier_match" -le 1 ] || return 2
+                        if [ "$earlier_match" -eq 0 ]; then
+                            earlier_proven=$earlier_candidate
+                            break
+                        fi
+                    fi
+                    [ "$earlier_kind" = C ] || break
+                    earlier_candidate=$earlier_ours
+                    earlier_candidate_tree=$earlier_base
+                    earlier_candidate_ok=1
+                    ;;
+                M)
+                    [ "$earlier_candidate_ok" -eq 1 ] || continue
+                    case "$earlier_ours$earlier_base$earlier_theirs" in
+                        ''|*[!0123456789abcdef]*) return 2 ;;
+                    esac
+                    earlier_key=earlier_merge_${earlier_ours}_${earlier_base}_${earlier_theirs}
+                    eval "earlier_merge=\${$earlier_key-}"
+                    if [ -z "$earlier_merge" ]; then
+                        # The result object lands in the throwaway store; a
+                        # clean merge that keeps "ours" names its object.
+                        earlier_merge=bad
+                        earlier_result=$(env -u GIT_CONFIG_PARAMETERS -u GIT_ATTR_SOURCE \
+                            GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+                            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 GIT_ATTR_NOSYSTEM=1 \
+                            GIT_OBJECT_DIRECTORY="$virtual_object_dir" \
+                            GIT_ALTERNATE_OBJECT_DIRECTORIES="$virtual_git_objects" \
+                            GIT_NO_LAZY_FETCH=1 \
+                            git --git-dir="$virtual_repository" merge-file --object-id \
+                                --diff-algorithm=histogram \
+                                "$earlier_ours" "$earlier_base" "$earlier_theirs" 2>/dev/null) &&
+                            [ "$earlier_result" = "$earlier_ours" ] && earlier_merge=ok
+                        eval "$earlier_key=\$earlier_merge"
+                    fi
+                    [ "$earlier_merge" = ok ] || earlier_candidate_ok=0
+                    ;;
+                *) return 2 ;;
+            esac
+        done < "$earlier_dir/plan"
+        if [ -n "$earlier_proven" ]; then
+            virtual_merge_commit=$earlier_proven
+            return 0
+        fi
+        virtual_merge_reason="$earlier_tip_reason; no earlier default commit proves integration (checked=$earlier_count${earlier_blocker:+; skipped: $earlier_blocker})"
         return 1
+    }
+
+    # Merge the tip candidate into default commit $1 with the shared merge
+    # base, isolated like the tip proof. Returns 0 when the merge is clean
+    # and yields exactly tree $2, 1 when it does not, 2 on failure.
+    git_virtual_merge_matches_tree() {
+        printf '%s -- %s %s\n' "$virtual_base" "$1" "$virtual_tip" |
+            env -u GIT_CONFIG_PARAMETERS -u GIT_ATTR_SOURCE \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 GIT_ATTR_NOSYSTEM=1 \
+                GIT_OBJECT_DIRECTORY="$virtual_object_dir" \
+                GIT_ALTERNATE_OBJECT_DIRECTORIES="$virtual_git_objects" \
+                GIT_NO_LAZY_FETCH=1 \
+                git --git-dir="$virtual_repository" -c core.attributesFile=/dev/null \
+                    -c merge.renormalize=false merge-tree --write-tree --stdin \
+                    --no-messages --name-only \
+                > "$earlier_dir/merge" 2> "$earlier_dir/merge.err"
+        earlier_merge_status=$?
+        if [ "$earlier_merge_status" -ne 0 ]; then
+            earlier_error=$(dd if="$earlier_dir/merge.err" bs=300 count=1 2>/dev/null | jq -Rs .) ||
+                earlier_error='""'
+            virtual_merge_reason="$earlier_tip_reason; earlier default virtual merge tool failed: exit=$earlier_merge_status; stderr=$earlier_error"
+            return 2
+        fi
+        # One record: status (1 is clean), tree, conflicted paths, empty field.
+        earlier_record=$(jq -Rr '
+            split("\u0000") |
+            if length < 4 or .[-1] != "" or .[-2] != "" then error("unterminated merge output") else .[:-2] end |
+            if (.[0] != "0" and .[0] != "1") or (.[1] | test("^([0-9a-f]{40}|[0-9a-f]{64})$") | not) or
+               (.[0] == "1" and length != 2)
+            then error("malformed merge record") else .[0] + " " + .[1] end
+        ' "$earlier_dir/merge") || {
+            virtual_merge_reason="$earlier_tip_reason; earlier default virtual merge returned malformed output"
+            return 2
+        }
+        [ "$earlier_record" = "1 $2" ]
     }
 
     git_tip_integrated() {
@@ -722,7 +1027,11 @@ f() {
         virtual_status=$?
         case "$virtual_status" in
             0)
-                integration_evidence='isolated conflict-free virtual merge equals default tree'
+                if [ -n "$virtual_merge_commit" ]; then
+                    integration_evidence="isolated conflict-free virtual merge equals the tree of earlier default commit $virtual_merge_commit"
+                else
+                    integration_evidence='isolated conflict-free virtual merge equals default tree'
+                fi
                 return 0
                 ;;
             1)
@@ -1698,7 +2007,7 @@ DISK_WORKER
         fi
         while inspection_running_count &&
               [ "$inspection_running_total" -ge "$inspection_pool_size" ]; do
-            wait_for_oldest_inspection_job
+            wait_for_any_inspection_job
         done
         start_job=$((inspection_job_count + 1))
         start_job_dir=$inspection_jobs_dir/$start_job
@@ -1785,6 +2094,25 @@ DISK_WORKER
         # shellcheck disable=SC2086
         set -- $inspection_running
         [ "$#" -eq 0 ] || collect_inspection_job "$1" || true
+    }
+
+    # Free a pool slot as soon as any job finishes, so that one long job
+    # does not hold back the start of the next. The shell reaps a finished
+    # job and keeps its status for `wait`, so `kill -0` then fails for it.
+    wait_for_any_inspection_job() {
+        while :; do
+            # shellcheck disable=SC2086
+            set -- $inspection_running
+            [ "$#" -gt 0 ] || return 0
+            for any_job do
+                eval "any_job_pid=\${inspection_job_pid_$any_job-}"
+                if [ -z "$any_job_pid" ] || ! kill -0 "$any_job_pid" 2>/dev/null; then
+                    collect_inspection_job "$any_job" || true
+                    return 0
+                fi
+            done
+            sleep 0.05 2>/dev/null || sleep 1
+        done
     }
 
     wait_for_inspection_jobs() {
@@ -2195,7 +2523,7 @@ DISK_WORKER
         temp_git_path=$1
         temp_git_head=$2
         path_is_temporary "$temp_git_path" || return 1
-        [ "$temporary_canonical" != "$current_git_root" ] || return 1
+        ! is_invoking_checkout "$temporary_canonical" || return 1
         temp_git_admin=$(registered_git_dir_for_worktree "$temp_git_path") || return 1
         case "$temp_git_admin" in
             "$git_common_dir"/worktrees/*) ;;
@@ -2227,7 +2555,7 @@ DISK_WORKER
             [ "$(git --git-dir="$temp_git_admin" rev-parse --verify HEAD 2>/dev/null)" = "$temp_git_head" ] || return 1
         fi
         path_is_temporary "$temp_git_path" || return 1
-        [ "$temporary_canonical" != "$current_git_root" ] || return 1
+        ! is_invoking_checkout "$temporary_canonical" || return 1
         # Reflog, FETCH_HEAD, ORIG_HEAD, and per-worktree ref commits are
         # pinned under recovery refs; in-progress operation state and any
         # unknown entry still keep the registration.
@@ -2288,7 +2616,7 @@ DISK_WORKER
         [ "$temporary_canonical" = "$temp_jj_canonical" ] || return 1
         path_is_temporary "$temp_jj_path" || return 1
         [ "$temporary_canonical" = "$temp_jj_canonical" ] || return 1
-        [ "$temporary_canonical" != "$current_git_root" ] &&
+        ! is_invoking_checkout "$temporary_canonical" &&
             [ "$temporary_canonical" != "$jj_current_root" ]
     }
 
@@ -2502,9 +2830,11 @@ DISK_WORKER
         # no enclosing .git directory: its HEAD beside object/ref stores is
         # independent history even under ignored paths. Anything found inside
         # a reported container sorts after that container, so not descending
-        # into it leaves the first reported path unchanged.
+        # into it leaves the first reported path unchanged. Package managers
+        # leave no repositories in node_modules, which holds nearly every
+        # entry of a JavaScript checkout, so it is not searched.
         (cd "$container_root" && find . -mindepth 1 \
-            \( -path './.git' -o -path './.jj' \) -prune -o \
+            \( -path './.git' -o -path './.jj' -o -name node_modules \) -prune -o \
             \( -name .git -o -name .jj \) -print0 -prune -o \
             -name HEAD -exec sh -c '
                 for head_path do
@@ -2888,6 +3218,36 @@ EOF
         return 1
     }
 
+    # Prints the object ID that a top-level admin file holds as its entire
+    # content: one full lowercase ID with an optional single trailing newline.
+    git_admin_file_oid() {
+        [ -f "$1" ] && [ ! -L "$1" ] || return 1
+        admin_file_oid=$(cat -- "$1") || return 1
+        case "$admin_file_oid" in ''|*[!0123456789abcdef]*) return 1 ;; esac
+        case "${#admin_file_oid}" in 40|64) ;; *) return 1 ;; esac
+        # The comparison rejects any other byte, including a NUL that the
+        # command substitution above would have dropped.
+        printf '%s' "$admin_file_oid" | cmp -s - "$1" ||
+            printf '%s\n' "$admin_file_oid" | cmp -s - "$1" || return 1
+        printf '%s\n' "$admin_file_oid"
+    }
+
+    git_admin_operation_in_progress() {
+        for admin_operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG \
+            rebase-merge rebase-apply sequencer; do
+            [ ! -e "$1/$admin_operation" ] && [ ! -L "$1/$admin_operation" ] || return 0
+        done
+        return 1
+    }
+
+    # A leftover single-ID file is harmless when a durable ref already
+    # contains its commit: removing the admin directory loses nothing.
+    git_admin_file_names_durable_commit() {
+        admin_durable_oid=$(git_admin_file_oid "$1") &&
+            git_history_proofs_are_trusted &&
+            commit_is_durably_anchored "$admin_durable_oid"
+    }
+
     git_admin_has_only_retained_state() {
         admin_retirement_blocker=
         [ -d "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] && [ -x "$1" ] || return 1
@@ -2915,7 +3275,27 @@ EOF
                        [ "$(GIT_NO_LAZY_FETCH=1 git cat-file -t "$admin_orig_head")" = commit ] &&
                        { { [ "$remote_evidence_fresh" -eq 1 ] &&
                            GIT_NO_LAZY_FETCH=1 git merge-base --is-ancestor "$admin_orig_head" "$default_tip"; } ||
-                         temporary_anchor_is_covered "$admin_orig_head" "${3-}"; }; then
+                         temporary_anchor_is_covered "$admin_orig_head" "${3-}" ||
+                         commit_is_durably_anchored "$admin_orig_head"; }; then
+                        continue
+                    fi ;;
+                # rerere leaves an empty merge record once no conflict is pending.
+                MERGE_RR)
+                    [ -f "$admin_entry" ] && [ ! -L "$admin_entry" ] &&
+                        [ ! -s "$admin_entry" ] && continue ;;
+                # merge-ort's record of its last conflicted result tree.
+                AUTO_MERGE)
+                    if ! git_admin_operation_in_progress "$1" &&
+                       admin_auto_merge=$(git_admin_file_oid "$admin_entry") &&
+                       [ "$(GIT_NO_LAZY_FETCH=1 git cat-file -t "$admin_auto_merge" 2>/dev/null)" = tree ]; then
+                        continue
+                    fi ;;
+                # Operation state and locks are never harmless leftovers.
+                MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|BISECT_*|*.lock) ;;
+                REBASE_HEAD)
+                    if [ ! -e "$1/rebase-merge" ] && [ ! -L "$1/rebase-merge" ] &&
+                       [ ! -e "$1/rebase-apply" ] && [ ! -L "$1/rebase-apply" ] &&
+                       git_admin_file_names_durable_commit "$admin_entry"; then
                         continue
                     fi ;;
                 logs)
@@ -2952,6 +3332,9 @@ EOF
                        [ -z "$admin_ref_entries" ]; then
                         continue
                     fi ;;
+                # Any other single-commit file, such as a tool's base marker.
+                *)
+                    git_admin_file_names_durable_commit "$admin_entry" && continue ;;
             esac
             admin_retirement_blocker="unexpected or unretained Git admin entry $(jq -Rn --arg name "$admin_name" '$name')"
             action_failure=$admin_retirement_blocker
@@ -3414,6 +3797,17 @@ EOF
     current_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     current_git_root=$(cd "$current_git_root" 2>/dev/null && pwd -P || true)
 
+    # Identity, not spelling: on a case-insensitive file system a worktree
+    # registered as /users/... is the invoking /Users/... checkout, while
+    # `pwd -P` keeps the case it was given.
+    is_invoking_checkout() {
+        [ -n "$current_git_root" ] || return 1
+        [ "$1" = "$current_git_root" ] && return 0
+        # Not POSIX, but supported by every sh this script runs under.
+        # shellcheck disable=SC3013
+        [ "$1" -ef "$current_git_root" ]
+    }
+
     first=1
     wt=
     head=
@@ -3539,7 +3933,7 @@ EOF
         case "$wt" in *"$(printf '\t')"*|*'"'*|*\\*) return 0 ;; esac
         ! path_is_temporary "$wt" && [ -d "$wt" ] || return 0
         prefetch_canonical=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
-        [ "$prefetch_canonical" != "$current_git_root" ] &&
+        ! is_invoking_checkout "$prefetch_canonical" &&
             [ ! -e "$prefetch_canonical/.jj" ] || return 0
         # The key names the registration (HEAD, branch, registered path), not
         # only the directory: the merged-PR proof depends on the branch, and a
@@ -3605,7 +3999,7 @@ EOF
             return
         fi
         if [ "$quoted_worktree_path" -ne 1 ] && path_is_temporary "$wt" &&
-           [ "$temporary_canonical" != "$current_git_root" ]; then
+           ! is_invoking_checkout "$temporary_canonical"; then
             temporary_registrations_seen=1
             temp_git_blocker=
             if forget_temporary_git_registration "$wt" "$head"; then
@@ -3669,7 +4063,7 @@ EOF
         }
         # The invoking worktree is repository context, never a cleanup
         # candidate. Keep this guard ahead of both Git and JJ classification.
-        if [ "$canonical" = "$current_git_root" ]; then
+        if is_invoking_checkout "$canonical"; then
             report_checkout protected "$wt" 'invoking checkout is active' "HEAD=$head" git
             return
         fi
@@ -3933,7 +4327,7 @@ EOF
             if [ -n "$checked_out_path" ]; then
                 # The invoking worktree and its checked-out branch are outside
                 # sweep's cleanup scope and remain silent in every pass.
-                [ "$checked_out_path" != "$current_git_root" ] || continue
+                ! is_invoking_checkout "$checked_out_path" || continue
                 if [ "$dry" -eq 1 ] &&
                    [ -n "${removable_git_worktree_branches-}" ] &&
                    grep -Fqx "$(printf '%s\t%s' "$local_branch" "$local_head")" \
@@ -4051,7 +4445,7 @@ EOF
 '*) continue ;;
             esac
             [ "$prefetch_canonical" != "$jj_current_root" ] &&
-                [ "$prefetch_canonical" != "$current_git_root" ] &&
+                ! is_invoking_checkout "$prefetch_canonical" &&
                 [ -f "$prefetch_canonical/.jj/repo" ] || continue
             prefetch_registrations=jj
             if [ -n "${deferred_git_worktrees-}" ] &&
@@ -4218,7 +4612,7 @@ EOF
                     fi
                     if path_is_temporary "$temp_candidate_jj_path" &&
                        [ "$temporary_canonical" != "$jj_current_root" ] &&
-                       [ "$temporary_canonical" != "$current_git_root" ]; then
+                       ! is_invoking_checkout "$temporary_canonical"; then
                         temp_jj_report_path=$temporary_canonical
                         admin_retirement_blocker=
                         temporary_registrations_seen=1
@@ -4286,7 +4680,7 @@ EOF
                     fi
 
                     if [ "$canonical" = "$jj_current_root" ] ||
-                       [ "$canonical" = "$current_git_root" ]; then
+                       is_invoking_checkout "$canonical"; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" ||
                             closed_cleanup_safe=0
                         report_checkout protected "$canonical" \
