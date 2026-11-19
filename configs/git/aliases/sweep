@@ -556,11 +556,18 @@ f() {
             fi
             cat "$virtual_tree_paths" >> "$virtual_attr_paths" || return 2
         done
+        # The trees share most paths. An attribute depends on the path and
+        # the source tree only, so each path is checked once, in the order
+        # of its first listing; the first reported driver stays the same.
+        jq -Rjs 'split("\u0000") | .[:-1] | . as $paths |
+            reduce range(0; length) as $i ({}; if has($paths[$i]) then . else .[$paths[$i]] = $i end) |
+            to_entries | sort_by(.value) | map(.key + "\u0000") | add // ""' \
+            "$virtual_attr_paths" > "$virtual_attr_paths.unique" || return 2
         for virtual_attr_tip in "$virtual_tip" "$default_tip" "$virtual_base"; do
             virtual_attr_values=$sweep_tmp_dir/virtual-attribute-values
             if ! GIT_INDEX_FILE=$sweep_tmp_dir/virtual-attributes.index GIT_NO_LAZY_FETCH=1 \
                 git check-attr --source="$virtual_attr_tip" -z --stdin merge \
-                < "$virtual_attr_paths" > "$virtual_attr_values" 2>/dev/null; then
+                < "$virtual_attr_paths.unique" > "$virtual_attr_values" 2>/dev/null; then
                 virtual_merge_reason='effective merge attributes could not be inspected read-only'
                 return 2
             fi
@@ -731,16 +738,24 @@ f() {
     }
 
     # True when a validated merged PR head (merge commit reachable from the
-    # default tip) has exactly the given tree.
+    # default tip) has exactly the given tree. One batch resolves every
+    # head's tree; reachability is then checked for the matching heads only.
     git_tree_matches_merged_pr_head() {
         pr_match_tree=$1
         [ -n "${merged_pr_heads-}" ] && [ -s "$merged_pr_heads" ] || return 1
-        while IFS="$(printf '\t')" read -r _ pr_match_head _ pr_match_commit; do
-            [ -n "$pr_match_head" ] || continue
-            git merge-base --is-ancestor "$pr_match_commit" "$default_tip" 2>/dev/null || continue
-            pr_match_head_tree=$(git rev-parse --verify "$pr_match_head^{tree}" 2>/dev/null) || continue
-            [ "$pr_match_head_tree" = "$pr_match_tree" ] && return 0
-        done < "$merged_pr_heads"
+        pr_match_heads=$sweep_tmp_dir/pr-match-heads
+        # Only complete records count, as with a tab-split `read`.
+        awk -F '\t' '$1 != "" && $2 != "" && $3 != "" && $4 != ""' \
+            "$merged_pr_heads" > "$pr_match_heads" &&
+            awk -F '\t' '{ print $2 "^{tree}" }' "$pr_match_heads" |
+            git cat-file --batch-check='%(objectname)' > "$pr_match_heads.trees" 2>/dev/null &&
+            awk -F '\t' -v tree="$pr_match_tree" '
+                NR == FNR { head_tree[FNR] = $0; next }
+                head_tree[FNR] == tree { print $4 }
+            ' "$pr_match_heads.trees" "$pr_match_heads" > "$pr_match_heads.commits" || return 1
+        while IFS= read -r pr_match_commit; do
+            git merge-base --is-ancestor "$pr_match_commit" "$default_tip" 2>/dev/null && return 0
+        done < "$pr_match_heads.commits"
         return 1
     }
 
@@ -863,6 +878,10 @@ f() {
             newline="
 "
             cr=$(printf "\r")
+            # Sorted paths share parents. Every ancestor of the last checked
+            # parent passed when that parent did, so each directory is
+            # checked once per batch instead of once per file beneath it.
+            checked_parent=.
             for path do
                 if [ "$kind" = jj ]; then
                     case "$path" in .jj|.jj/*) continue ;; esac
@@ -873,12 +892,14 @@ f() {
                 file=./$path
                 parent=${file%/*}
                 while [ "$parent" != . ]; do
+                    case "$checked_parent/" in "$parent"/*) break ;; esac
                     if [ -L "$parent" ] ||
                        { [ -e "$parent" ] && { [ ! -d "$parent" ] || [ ! -x "$parent" ]; }; }; then
                         exit 255
                     fi
                     parent=${parent%/*}
                 done
+                checked_parent=${file%/*}
                 if [ -L "$file" ]; then
                     # Preserve trailing newlines in the link target.
                     target=$(readlink -n "$file" && printf .) || exit 255
@@ -921,17 +942,25 @@ DISK_WORKER
         ' "$sweep_tmp_dir/disk-regular-names" > "$sweep_tmp_dir/disk-regular-modes" || return 1
         git_disk_proof_command hash-object --no-filters -w --stdin-paths \
             < "$sweep_tmp_dir/disk-regular-paths" > "$sweep_tmp_dir/disk-regular-oids" || return 1
-        (
-            while IFS= read -r disk_entry; do
-                IFS= read -r disk_oid <&5 || exit 1
-                printf '%s %s\t%s\000' "${disk_entry%% *}" "$disk_oid" "${disk_entry#* }" || exit 1
-            done < "$sweep_tmp_dir/disk-regular-modes"
-            ! IFS= read -r disk_oid <&5
-        ) 5< "$sweep_tmp_dir/disk-regular-oids" >> "$sweep_tmp_dir/disk-index-info"
+        # Pair each "MODE PATH" line with its object ID; the counts must
+        # match exactly. Batched names hold no newline, so the records can be
+        # built line by line and NUL-terminated afterwards.
+        LC_ALL=C awk -v oids="$sweep_tmp_dir/disk-regular-oids" '
+            {
+                if ((getline oid < oids) <= 0) { unpaired = 1; exit }
+                print substr($0, 1, 6) " " oid "\t" substr($0, 8)
+            }
+            END { if (unpaired || (getline oid < oids) > 0) exit 1 }
+        ' "$sweep_tmp_dir/disk-regular-modes" > "$sweep_tmp_dir/disk-regular-info" &&
+            tr '\n' '\000' < "$sweep_tmp_dir/disk-regular-info" >> "$sweep_tmp_dir/disk-index-info"
     }
 
     # Read the bytes and modes directly into throwaway objects and an index.
     # Git's ignore rules decide only which additional paths to consider.
+    # `containers-checked` is passed only by a caller that also runs the
+    # protected-container walk over this checkout before the result can
+    # authorize removal; that walk covers every entry, so repeating it here
+    # would be a second full pass.
     build_git_disk_tree() {
         disk_worktree=$1
         disk_seed=${2:-HEAD}
@@ -943,8 +972,10 @@ DISK_WORKER
 
         [ -n "${sweep_tmp_dir-}" ] && [ -n "${virtual_object_dir-}" ] || return 1
         case "$sweep_tmp_dir" in /*) ;; *) return 1 ;; esac
-        inspect_protected_containers "$disk_worktree"
-        [ "$?" -eq 1 ] || return 1
+        if [ "${5-}" != containers-checked ]; then
+            inspect_protected_containers "$disk_worktree"
+            [ "$?" -eq 1 ] || return 1
+        fi
 
         disk_objects=$git_common_dir/objects
         [ -d "$disk_objects" ] || return 1
@@ -1059,21 +1090,47 @@ DISK_WORKER
         proof_seed=$proof_tip
     }
 
+    # History is proven first: a `@` it cannot authorize never needs a walk.
     jj_workspace_disk_proof() {
         proof_root=$1
         jj_disk_proof_evidence=
         disk_tree_blocker=
+        jj_history_gate "$proof_root" "$2" || return 1
+        proof_tip_evidence=$jj_integration_evidence
+        jj_workspace_disk_tree_proof "$proof_root" "$2" "${3-}" || return 1
+        jj_disk_proof_evidence="$proof_disk_evidence; @ ${proof_tip_evidence:-exact integration proof}"
+    }
+
+    # The file part of the JJ proof. Sets proof_seed and proof_disk_evidence.
+    jj_workspace_disk_tree_proof() {
+        proof_disk_evidence=
+        disk_tree_blocker=
         jj_disk_proof_seed "$2" || return 1
         [ "$remote_evidence_fresh" -eq 1 ] && git_history_proofs_are_trusted &&
-            build_git_disk_tree "$proof_root" "$proof_seed" "${3-}" || return 1
+            build_git_disk_tree "$1" "$proof_seed" "${3-}" || return 1
         # Retain the JJ attribute guard independently of the byte comparison.
         check_disk_tree_attributes && disk_tree_has_retained_history || return 1
         proof_disk_evidence=$disk_tree_evidence
+    }
+
+    # Every JJ path to removal requires the inventoried `@` itself to pass the
+    # exact JJ integration proof over trusted, fresh default history. Sets
+    # the jj_integration_* results like jj_tip_integrated.
+    jj_history_gate() {
         jj_integration_check_safe=1
         jj_integration_evidence=
         jj_integration_failure='no exact retained-history proof'
-        jj_tip_integrated "$proof_root" "$proof_tip" || return 1
-        jj_disk_proof_evidence="$proof_disk_evidence; @ ${jj_integration_evidence:-exact integration proof}"
+        if [ "$remote_evidence_fresh" -ne 1 ]; then
+            jj_integration_check_safe=0
+            jj_integration_failure=${remote_evidence_reason:-'cached default branch is stale or unverifiable'}
+            return 1
+        fi
+        if ! git_history_proofs_are_trusted; then
+            jj_integration_check_safe=0
+            jj_integration_failure='replacement, shallow, partial, promisor, or grafted history is active'
+            return 1
+        fi
+        jj_tip_integrated "$1" "$2"
     }
 
     # Use the exact fetched Git default SHA rather than JJ's configurable
@@ -1182,6 +1239,28 @@ DISK_WORKER
     # GitHub PR evidence and JJ protection ledger
     # ----------------------------------------------------------------------
 
+    # A result that fills its limit may be truncated, so the query is repeated
+    # with twice the limit until it returns fewer PRs. At the ceiling the
+    # caller treats the inventory as incomplete. Runs as a background job.
+    pr_query_ceiling=64000
+    query_pr_heads() {
+        pr_query_limit=1000
+        while :; do
+            gh pr list --repo "$github_repo" --state "$1" \
+                --limit "$pr_query_limit" \
+                --json headRefName,headRefOid,isCrossRepository,baseRefName,state,mergeCommit,headRepository,headRepositoryOwner \
+                --jq '.[] | [.headRefName, .headRefOid, .isCrossRepository, .baseRefName, .state, (.mergeCommit.oid // ""), (.headRepository.nameWithOwner // ""), (.headRepositoryOwner.login // "")] | @tsv' \
+                > "$2" || return 1
+            pr_query_count=$(awk 'END { print NR }' "$2") || return 1
+            [ "$pr_query_count" -ge "$pr_query_limit" ] || return 0
+            if [ "$pr_query_limit" -ge "$pr_query_ceiling" ]; then
+                : > "$2.truncated"
+                return
+            fi
+            pr_query_limit=$((pr_query_limit * 2))
+        done
+    }
+
     load_closed_pr_heads() {
         # An empty ledger means "no PR-based deletion eligibility". Create it
         # before querying so every error path naturally fails closed.
@@ -1210,48 +1289,43 @@ DISK_WORKER
         github_repo_slug=${github_repo#*/}
         github_repo_owner=${github_repo_slug%%/*}
 
-        merged_pr_limit=1000
-        closed_pr_limit=1000
-
         # Merged and closed-without-merge are queried separately because `gh`
-        # exposes them as distinct states. Each query is capped at 1000 PRs.
+        # exposes them as distinct states. Both run concurrently, and each
+        # query whose result fills its limit is repeated with twice the limit.
         merged_pr_heads_raw=$sweep_tmp_dir/merged-pr-heads.raw
         closed_only_pr_heads_raw=$sweep_tmp_dir/closed-only-pr-heads.raw
         : > "$merged_pr_heads_raw"
         : > "$closed_only_pr_heads_raw"
+        rm -f -- "$merged_pr_heads_raw.truncated" "$closed_only_pr_heads_raw.truncated"
 
-        if [ "$merged_pr_limit" -ne 0 ]; then
-            if ! gh pr list --repo "$github_repo" --state merged \
-                --limit "$merged_pr_limit" \
-                --json headRefName,headRefOid,isCrossRepository,baseRefName,state,mergeCommit,headRepository,headRepositoryOwner \
-                --jq '.[] | [.headRefName, .headRefOid, .isCrossRepository, .baseRefName, .state, (.mergeCommit.oid // ""), (.headRepository.nameWithOwner // ""), (.headRepositoryOwner.login // "")] | @tsv' \
-                > "$merged_pr_heads_raw"; then
-                echo "skip closed PR cleanup: GitHub query failed for merged PRs" >&2
-                : > "$closed_pr_heads"
-                : > "$merged_pr_heads"
-                return
-            fi
+        query_pr_heads merged "$merged_pr_heads_raw" &
+        merged_pr_query=$!
+        query_pr_heads closed "$closed_only_pr_heads_raw" &
+        closed_pr_query=$!
+        pr_query_pids="$merged_pr_query $closed_pr_query"
+        wait "$merged_pr_query"
+        merged_pr_status=$?
+        wait "$closed_pr_query"
+        closed_pr_status=$?
+        pr_query_pids=
+        if [ "$merged_pr_status" -ne 0 ]; then
+            echo "skip closed PR cleanup: GitHub query failed for merged PRs" >&2
+            : > "$closed_pr_heads"
+            : > "$merged_pr_heads"
+            return
         fi
-        if [ "$closed_pr_limit" -ne 0 ]; then
-            if ! gh pr list --repo "$github_repo" --state closed \
-                --limit "$closed_pr_limit" \
-                --json headRefName,headRefOid,isCrossRepository,baseRefName,state,mergeCommit,headRepository,headRepositoryOwner \
-                --jq '.[] | [.headRefName, .headRefOid, .isCrossRepository, .baseRefName, .state, (.mergeCommit.oid // ""), (.headRepository.nameWithOwner // ""), (.headRepositoryOwner.login // "")] | @tsv' \
-                > "$closed_only_pr_heads_raw"; then
-                echo "skip closed PR cleanup: GitHub query failed for closed PRs" >&2
-                : > "$closed_pr_heads"
-                : > "$merged_pr_heads"
-                return
-            fi
+        if [ "$closed_pr_status" -ne 0 ]; then
+            echo "skip closed PR cleanup: GitHub query failed for closed PRs" >&2
+            : > "$closed_pr_heads"
+            : > "$merged_pr_heads"
+            return
         fi
 
-        merged_pr_count=$(awk 'END { print NR }' "$merged_pr_heads_raw")
-        closed_pr_count=$(awk 'END { print NR }' "$closed_only_pr_heads_raw")
         pr_inventory_complete=1
-        if { [ "$merged_pr_limit" -ne 0 ] && [ "$merged_pr_count" -ge "$merged_pr_limit" ]; } ||
-           { [ "$closed_pr_limit" -ne 0 ] && [ "$closed_pr_count" -ge "$closed_pr_limit" ]; }; then
+        if [ -e "$merged_pr_heads_raw.truncated" ] ||
+           [ -e "$closed_only_pr_heads_raw.truncated" ]; then
             pr_inventory_complete=0
-            echo "git sweep: GitHub PR evidence reached a configured limit; shared-history cleanup is disabled" >&2
+            echo "git sweep: GitHub PR evidence reached the $pr_query_ceiling-PR query ceiling; shared-history cleanup is disabled" >&2
         fi
 
         # Reject malformed records and normalize SHAs in staging files. Every
@@ -1576,11 +1650,244 @@ DISK_WORKER
     }
 
     # ----------------------------------------------------------------------
+    # Parallel read-only inspection
+    # ----------------------------------------------------------------------
+
+    # Planning runs each candidate's read-only proofs (history first, then
+    # the file walk) as background jobs in a bounded pool. A job calls the
+    # same proof functions as a serial run, inside a subshell with its own
+    # scratch directory, and saves the variables the report needs. The
+    # serial loops consume the results in inventory order, so the report
+    # matches a serial run; a job without a complete, well-formed result
+    # leaves its checkout unverifiable. Execution never uses jobs.
+    inspection_pool_limit=8
+    inspection_pool_size=$(getconf _NPROCESSORS_ONLN 2>/dev/null) ||
+        inspection_pool_size=$(sysctl -n hw.ncpu 2>/dev/null) ||
+        inspection_pool_size=1
+    case "$inspection_pool_size" in ''|0|*[!0-9]*) inspection_pool_size=1 ;; esac
+    [ "$inspection_pool_size" -le "$inspection_pool_limit" ] ||
+        inspection_pool_size=$inspection_pool_limit
+    inspection_jobs_dir=
+    inspection_job_dir=
+    inspection_job_count=0
+    inspection_running=
+    pr_query_pids=
+    git_inspection_values='git_proof_stage inspected_head inspected_git_admin
+        inspected_status inspected_status_kind inspected_status_example
+        worktree_integrated worktree_evidence worktree_failure
+        git_integration_check_safe admin_retirement_blocker'
+    jj_inspection_values='jj_proof_stage jj_integration_check_safe
+        jj_integration_evidence jj_integration_failure workspace_is_git git_head
+        plan_jj_git_admin admin_retirement_blocker disk_proof_ok
+        disk_tree_blocker jj_disk_proof_evidence'
+
+    # Start `FUNCTION ARG...` as the job for KIND, PATH and REVISION. Returns
+    # 1 without starting anything when the pool is unavailable; the serial
+    # loop then evaluates that checkout itself.
+    start_inspection_job() {
+        [ "$sweep_phase" = planning ] && [ "$inspection_pool_size" -gt 1 ] &&
+            [ -n "${sweep_tmp_dir-}" ] || return 1
+        # A directory registered twice gets one job; the other registration
+        # is evaluated serially once the pool has drained.
+        ! find_inspection_job "$2" || return 1
+        if [ -z "$inspection_jobs_dir" ]; then
+            mkdir "$sweep_tmp_dir/inspection-jobs" || return 1
+            inspection_jobs_dir=$sweep_tmp_dir/inspection-jobs
+            # Load the default-history tree index once; jobs only read it.
+            [ "$remote_evidence_fresh" -ne 1 ] || load_default_trees || true
+        fi
+        while inspection_running_count &&
+              [ "$inspection_running_total" -ge "$inspection_pool_size" ]; do
+            wait_for_oldest_inspection_job
+        done
+        start_job=$((inspection_job_count + 1))
+        start_job_dir=$inspection_jobs_dir/$start_job
+        mkdir "$start_job_dir" "$start_job_dir/scratch" || return 1
+        inspection_job_count=$start_job
+        eval "inspection_job_kind_$start_job=\$1 inspection_job_path_$start_job=\$2" \
+            "inspection_job_revision_$start_job=\$3 inspection_job_status_$start_job="
+        shift 3
+        run_inspection_job "$start_job_dir" "$@" > "$start_job_dir/output" 2>&1 &
+        eval "inspection_job_pid_$start_job=\$!"
+        inspection_running="$inspection_running $start_job"
+    }
+
+    # Runs only as a background job: it repoints the scratch locations of
+    # its own subshell, never those of the planning loop.
+    run_inspection_job() {
+        inspection_job_dir=$1
+        sweep_tmp_dir=$1/scratch
+        virtual_object_dir=$sweep_tmp_dir/virtual-objects
+        fallback_gitignore_active=0
+        shift
+        trap 'cleanup_gitignore_fallback; exit 1' HUP TERM
+        "$@" && : > "$inspection_job_dir/complete"
+    }
+
+    inspection_running_count() {
+        # shellcheck disable=SC2086
+        set -- $inspection_running
+        inspection_running_total=$#
+    }
+
+    # Sets found_inspection_job to the job for PATH, or for PATH with KIND
+    # and REVISION when those are given.
+    find_inspection_job() {
+        find_job=$inspection_job_count
+        find_job_path=
+        find_job_key=
+        while [ "$find_job" -gt 0 ]; do
+            eval "find_job_path=\$inspection_job_path_$find_job"
+            eval "find_job_key=\$inspection_job_kind_$find_job/\$inspection_job_revision_$find_job"
+            if [ "$find_job_path" = "$1" ] &&
+               { [ "$#" -eq 1 ] || [ "$find_job_key" = "$2/$3" ]; }; then
+                found_inspection_job=$find_job
+                return 0
+            fi
+            find_job=$((find_job - 1))
+        done
+        return 1
+    }
+
+    # Reap a job once and remember its status. Succeeds only for a job that
+    # exited normally after marking its result complete.
+    collect_inspection_job() {
+        collect_job=$1
+        eval "collect_job_pid=\${inspection_job_pid_$collect_job-}"
+        if [ -n "$collect_job_pid" ]; then
+            forget_running_inspection_job "$collect_job"
+            wait "$collect_job_pid"
+            collect_job_status=$?
+            eval "inspection_job_pid_$collect_job="
+            eval "inspection_job_status_$collect_job=\$collect_job_status"
+        fi
+        eval "collect_job_status=\${inspection_job_status_$collect_job-}"
+        if [ "$collect_job_status" = 0 ] &&
+           [ -f "$inspection_jobs_dir/$collect_job/complete" ]; then
+            return 0
+        fi
+        cleanup_inspection_job_fallback "$inspection_jobs_dir/$collect_job" || true
+        return 1
+    }
+
+    forget_running_inspection_job() {
+        forget_job=$1
+        # shellcheck disable=SC2086
+        set -- $inspection_running
+        inspection_running=
+        for running_job do
+            [ "$running_job" = "$forget_job" ] ||
+                inspection_running="$inspection_running $running_job"
+        done
+    }
+
+    wait_for_oldest_inspection_job() {
+        # shellcheck disable=SC2086
+        set -- $inspection_running
+        [ "$#" -eq 0 ] || collect_inspection_job "$1" || true
+    }
+
+    wait_for_inspection_jobs() {
+        while inspection_running_count && [ "$inspection_running_total" -gt 0 ]; do
+            wait_for_oldest_inspection_job
+        done
+    }
+
+    # A job stopped before its own cleanup can leave the transient ignore
+    # files it recorded. Remove exactly those, as cleanup_gitignore_fallback
+    # would have.
+    cleanup_inspection_job_fallback() {
+        [ -f "$1/fallback" ] || return 0
+        [ "${fallback_gitignore_active-0}" -eq 0 ] || return 1
+        stale_staging=$(cat -- "$1/fallback" && printf .) || return 1
+        stale_staging=${stale_staging%.}
+        case "${stale_staging##*/}" in .gitignore.git-sweep.??????) ;; *) return 1 ;; esac
+        [ -e "$stale_staging" ] || [ -L "$stale_staging" ] || return 0
+        fallback_gitignore_active=1
+        fallback_gitignore_target=${stale_staging%/*}/.gitignore
+        fallback_gitignore_staging=$stale_staging
+        cleanup_gitignore_fallback
+    }
+
+    # One file per variable keeps every value byte-exact, including
+    # trailing newlines, without evaluating job output as shell code.
+    # Invoked by the job functions, which run through start_inspection_job.
+    # shellcheck disable=SC2329
+    save_inspection_values() {
+        mkdir "$inspection_job_dir/values" || return 1
+        save_value=
+        for save_name do
+            eval "save_value=\${$save_name-}"
+            printf '%s' "$save_value" > "$inspection_job_dir/values/$save_name" || return 1
+        done
+    }
+
+    # Wait for a job, replay its output where a serial run would have
+    # printed it, and load the named values. Returns 1 when the job failed
+    # or left no complete result.
+    consume_inspection_job() {
+        consume_job_dir=$inspection_jobs_dir/$1
+        consume_status=0
+        collect_inspection_job "$1" || consume_status=1
+        shift
+        cat -- "$consume_job_dir/output" 2>/dev/null || true
+        [ "$consume_status" -eq 0 ] || return 1
+        for load_name do
+            [ -f "$consume_job_dir/values/$load_name" ] || return 1
+            load_value=$(cat -- "$consume_job_dir/values/$load_name" && printf .) || return 1
+            load_value=${load_value%.}
+            eval "$load_name=\$load_value"
+        done
+    }
+
+    # Stop the GitHub queries and inspection jobs that are still running, so
+    # nothing outlives the temporary directory or leaves an ignore file.
+    stop_sweep_background_work() {
+        stop_pids=${pr_query_pids-}
+        stop_job=1
+        while [ "$stop_job" -le "${inspection_job_count:-0}" ]; do
+            eval "stop_pid=\${inspection_job_pid_$stop_job-}"
+            stop_pids="$stop_pids${stop_pid:+ $stop_pid}"
+            stop_job=$((stop_job + 1))
+        done
+        case "$stop_pids" in *[0-9]*) ;; *) return 0 ;; esac
+        # A job shell runs its cleanup trap after its current command, so
+        # that command's processes are stopped as well.
+        stop_descendants=$(ps -A -o pid= -o ppid= 2>/dev/null | awk -v roots="$stop_pids" '
+            BEGIN { split(roots, list, " "); for (i in list) marked[list[i]] = 1 }
+            { parent[$1] = $2; pids[++count] = $1 }
+            END {
+                do {
+                    changed = 0
+                    for (i = 1; i <= count; i++)
+                        if (!(pids[i] in marked) && (parent[pids[i]] in marked)) {
+                            marked[pids[i]] = 1
+                            print pids[i]
+                            changed = 1
+                        }
+                } while (changed)
+            }')
+        # shellcheck disable=SC2086
+        kill -TERM $stop_pids $stop_descendants 2>/dev/null
+        for stop_pid in ${pr_query_pids-}; do
+            wait "$stop_pid" 2>/dev/null
+        done
+        pr_query_pids=
+        stop_job=1
+        while [ "$stop_job" -le "${inspection_job_count:-0}" ]; do
+            collect_inspection_job "$stop_job" 2>/dev/null || true
+            stop_job=$((stop_job + 1))
+        done
+        inspection_running=
+    }
+
+    # ----------------------------------------------------------------------
     # Workspace identity and moved-worktree recovery helpers
     # ----------------------------------------------------------------------
 
     cleanup_sweep_tmp() {
         cleanup_gitignore_fallback || true
+        stop_sweep_background_work
         [ "${action_quarantine_active:-0}" -eq 0 ] || return 0
         if [ -n "${action_admin_backup-}" ]; then
             rmdir -- "$action_admin_backup" 2>/dev/null || true
@@ -1671,6 +1978,13 @@ DISK_WORKER
 
         fallback_gitignore_staging=$(mktemp "$fallback_worktree/.gitignore.git-sweep.XXXXXX") || return 1
         fallback_gitignore_active=1
+        # A planning job records its staging file so that the main shell can
+        # remove both files if the job stops before its own cleanup.
+        if [ -n "${inspection_job_dir-}" ] &&
+           ! printf '%s' "$fallback_gitignore_staging" > "$inspection_job_dir/fallback"; then
+            cleanup_gitignore_fallback || true
+            return 1
+        fi
         if ! cp -- "$primary_gitignore_source" "$fallback_gitignore_staging" ||
            ! printf '\n/.gitignore\n/%s\n' "${fallback_gitignore_staging##*/}" \
                 >> "$fallback_gitignore_staging" ||
@@ -2184,23 +2498,24 @@ DISK_WORKER
     inspect_protected_containers() {
         container_root=$1
         protected_container_path=
+        # One traversal covers both kinds of container. A bare repository has
+        # no enclosing .git directory: its HEAD beside object/ref stores is
+        # independent history even under ignored paths. Anything found inside
+        # a reported container sorts after that container, so not descending
+        # into it leaves the first reported path unchanged.
         (cd "$container_root" && find . -mindepth 1 \
             \( -path './.git' -o -path './.jj' \) -prune -o \
-            \( -name .git -o -name .jj \) -print0 -prune) \
-            > "$sweep_tmp_dir/protected-containers" 2>/dev/null || return 2
-        # A bare repository has no enclosing .git directory. Its HEAD and
-        # object/ref stores are independent history even under ignored paths.
-        (cd "$container_root" && find . -mindepth 1 \
-            \( -path './.git' -o -path './.jj' \) -prune -o \
-            -name HEAD -type f -exec sh -c '
+            \( -name .git -o -name .jj \) -print0 -prune -o \
+            -name HEAD -exec sh -c '
                 for head_path do
                     repository_path=${head_path%/HEAD}
-                    if [ -d "$repository_path/objects" ] &&
+                    if [ -f "$head_path" ] && [ ! -L "$head_path" ] &&
+                       [ -d "$repository_path/objects" ] &&
                        [ -d "$repository_path/refs" ]; then
                         printf "%s\000" "$repository_path"
                     fi
                 done
-            ' sh {} +) >> "$sweep_tmp_dir/protected-containers" 2>/dev/null || return 2
+            ' sh {} +) > "$sweep_tmp_dir/protected-containers" 2>/dev/null || return 2
         protected_container_path=$(jq -Rnr --rawfile paths "$sweep_tmp_dir/protected-containers" \
             '$paths | split("\u0000") | map(select(length > 0)) | sort | .[0] // empty | ltrimstr("./") | @json') || return 2
         [ -n "$protected_container_path" ]
@@ -2504,14 +2819,16 @@ EOF
         done
         awk '!seen[$0]++' "$admin_anchor_list" > "$sweep_tmp_dir/admin-anchor-unique" || return 1
         while IFS= read -r admin_anchor_oid; do
+            # Either a containing ref or an integration proof suffices; the
+            # ref lookup is far cheaper, so it is tried first.
             if [ "$(GIT_NO_LAZY_FETCH=1 git cat-file -t "$admin_anchor_oid" 2>/dev/null)" = commit ] &&
                { [ "$admin_anchor_oid" = "${2-}" ] ||
                  [ "${3-}" = would-pin ] ||
-                 (git_admin_anchor_is_integrated "$admin_anchor_oid") ||
                  { admin_anchor_ref=$(GIT_NO_LAZY_FETCH=1 git for-each-ref --count=1 \
                        --format='%(refname)' --contains="$admin_anchor_oid" \
                        refs/heads refs/tags refs/remotes refs/jj refs/sweep/recovery 2>/dev/null) &&
-                   [ -n "$admin_anchor_ref" ]; }; }; then
+                   [ -n "$admin_anchor_ref" ]; } ||
+                 (git_admin_anchor_is_integrated "$admin_anchor_oid"); }; then
                 continue
             fi
             admin_retirement_blocker="Git admin reflog or FETCH_HEAD commit is not proven retained: $admin_anchor_oid"
@@ -2926,11 +3243,16 @@ EOF
     }
 
     inspect_git_worktree() {
-        inspected_worktree=$1
-        inspected_head=
         inspected_status=
         inspected_status_kind=
         inspected_status_example=
+        inspect_git_identity "$1" && inspect_git_contents "${2-}"
+    }
+
+    # Registration and HEAD only; reads no checkout contents.
+    inspect_git_identity() {
+        inspected_worktree=$1
+        inspected_head=
         worktree_needs_repair=0
 
         inspected_git_admin=$(registered_git_dir_for_worktree "$inspected_worktree") || return 1
@@ -2942,10 +3264,24 @@ EOF
                 ! git -C "$inspected_worktree" rev-parse --verify HEAD >/dev/null 2>&1 || return 1
             worktree_needs_repair=1
         fi
+    }
+
+    # Contents of the worktree identified by inspect_git_identity: the
+    # protected-container walk, then the disk tree.
+    inspect_git_contents() {
+        inspected_status=
+        inspected_status_kind=
+        inspected_status_example=
         protect_git_containers || return 1
         [ -z "$inspected_status" ] || return 0
+        inspect_git_disk_tree "${1-}"
+    }
 
-        if ! build_git_disk_tree "$inspected_worktree" "$inspected_head" "$inspected_git_admin" "${2:-plain}"; then
+    # The disk tree of the identified worktree compared with its HEAD. The
+    # caller runs the protected-container walk, before or after this.
+    inspect_git_disk_tree() {
+        if ! build_git_disk_tree "$inspected_worktree" "$inspected_head" "$inspected_git_admin" \
+            "${1:-plain}" containers-checked; then
             [ -n "$disk_tree_blocker" ] || return 1
             inspected_status=$disk_tree_blocker
             inspected_status_kind=tracked
@@ -3121,6 +3457,131 @@ EOF
     # Plain Git worktree and gone-branch cleanup
     # ----------------------------------------------------------------------
 
+    # Read-only proofs for the worktree at $1 (listed as $head on
+    # $worktree_branch): registration and live HEAD, then history, and only
+    # for history that could authorize removal, the file walk, cleanliness
+    # and recovery anchors. Sets git_proof_stage to the stage that stopped,
+    # or `clean`; the caller reports it.
+    evaluate_git_worktree_proofs() {
+        git_proof_stage=identity
+        inspected_head=
+        inspected_git_admin=
+        inspected_status=
+        inspected_status_kind=
+        inspected_status_example=
+        worktree_integrated=0
+        worktree_evidence=
+        worktree_failure=
+        git_integration_check_safe=1
+        admin_retirement_blocker=
+        inspect_git_identity "$1" || return 0
+        git_proof_stage=head_changed
+        [ "$inspected_head" = "$head" ] || return 0
+        # Eligibility is independent of branch tracking state. In particular,
+        # a clean HEAD anywhere in old default-branch history qualifies here.
+        git_proof_stage=history
+        git_tip_integrated "$head" && worktree_integrated=1
+        worktree_evidence=$integration_evidence
+        worktree_failure=$integration_failure_reason
+        if [ "$worktree_integrated" -ne 1 ] &&
+           [ "$remote_evidence_fresh" -eq 1 ] &&
+           git_head_is_merged_pr "$worktree_branch" "$head"; then
+            worktree_integrated=1
+            worktree_evidence='validated exact merged PR head and reachable merge commit'
+            git_integration_check_safe=1
+        fi
+        [ "$worktree_integrated" -eq 1 ] || return 0
+        # Classify only a readable, fully clean worktree. Untracked files
+        # count as dirty because removing the directory would lose them.
+        git_proof_stage=unreadable
+        inspect_git_disk_tree && cleanup_gitignore_fallback || return 0
+        git_proof_stage=dirty
+        [ -z "$inspected_status" ] || return 0
+        # `git worktree remove` deletes the whole admin dir, so every entry in
+        # it (per-worktree refs, ORIG_HEAD, in-progress operation state,
+        # `config.worktree`, reflogs) must pass the same allowlist as JJ.
+        git_proof_stage=anchors
+        git_worktree_index_is_retained "$inspected_git_admin" "$head" &&
+            git_admin_has_only_retained_state "$inspected_git_admin" "$head" || return 0
+        # The walk over every entry, ignored ones included, for nested
+        # repositories is the costliest proof, so it
+        # runs last, once every other proof has passed.
+        git_proof_stage=unreadable
+        protect_git_containers || return 0
+        git_proof_stage=dirty
+        [ -z "$inspected_status" ] || return 0
+        git_proof_stage=clean
+    }
+
+    # Invoked through start_inspection_job.
+    # shellcheck disable=SC2329
+    inspect_git_worktree_job() {
+        head=$2
+        worktree_branch=$3
+        evaluate_git_worktree_proofs "$1"
+        # shellcheck disable=SC2086
+        save_inspection_values $git_inspection_values
+    }
+
+    # Start a planning job for each worktree that process_git_worktree would
+    # evaluate. The same gates run first, so no job reads a checkout that a
+    # serial run would not have inspected. Invoked through
+    # process_git_worktree_inventory.
+    # shellcheck disable=SC2329
+    prefetch_git_worktree() {
+        [ -n "$wt" ] || return 0
+        if [ "$first" -eq 1 ]; then
+            first=0
+            return 0
+        fi
+        [ "$quoted_worktree_path" -ne 1 ] && [ "$locked" -ne 1 ] &&
+            [ "$prunable" -ne 1 ] || return 0
+        case "$wt" in *"$(printf '\t')"*|*'"'*|*\\*) return 0 ;; esac
+        ! path_is_temporary "$wt" && [ -d "$wt" ] || return 0
+        prefetch_canonical=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+        [ "$prefetch_canonical" != "$current_git_root" ] &&
+            [ ! -e "$prefetch_canonical/.jj" ] || return 0
+        # The key names the registration (HEAD, branch, registered path), not
+        # only the directory: the merged-PR proof depends on the branch, and a
+        # second registration of the same directory must not reuse this result.
+        start_inspection_job git "$prefetch_canonical" "$head $worktree_branch $wt" \
+            inspect_git_worktree_job "$prefetch_canonical" "$head" "$worktree_branch" || true
+    }
+
+    # Load a planning job's result for the worktree at $1. Returns 1 when no
+    # job ran for it, after draining the pool so that the serial evaluation
+    # never overlaps a job. A failed or malformed result sets stage `failed`.
+    use_git_worktree_inspection() {
+        [ "$sweep_phase" = planning ] && [ "$inspection_job_count" -gt 0 ] || return 1
+        if ! find_inspection_job "$1" git "$head $worktree_branch $wt"; then
+            wait_for_inspection_jobs
+            return 1
+        fi
+        # shellcheck disable=SC2086
+        consume_inspection_job "$found_inspection_job" $git_inspection_values &&
+            git_inspection_is_well_formed || git_proof_stage=failed
+    }
+
+    git_inspection_is_well_formed() {
+        case "$worktree_integrated$git_integration_check_safe" in
+            00|01|10|11) ;;
+            *) return 1 ;;
+        esac
+        case "$git_proof_stage" in
+            identity) return 0 ;;
+            head_changed) [ -n "$inspected_head" ] && [ "$inspected_head" != "$head" ]; return ;;
+            history) [ "$inspected_head" = "$head" ] && [ "$worktree_integrated" -eq 0 ]; return ;;
+            unreadable|dirty|anchors|clean) ;;
+            *) return 1 ;;
+        esac
+        [ "$inspected_head" = "$head" ] && [ "$worktree_integrated" -eq 1 ] || return 1
+        case "$inspected_git_admin" in "$git_common_dir"/worktrees/?*) ;; *) return 1 ;; esac
+        case "$git_proof_stage" in
+            dirty) [ -n "$inspected_status" ] ;;
+            anchors|clean) [ -z "$inspected_status" ] ;;
+        esac
+    }
+
     process_git_worktree() {
         [ -n "$wt" ] || return
         # A literal tab cannot be represented safely in the tab-delimited
@@ -3225,37 +3686,38 @@ EOF
             fi
             return
         fi
-        # Classify only a readable, unchanged, fully clean worktree. Untracked
-        # files count as dirty because removing the directory would lose them.
-        if ! inspect_git_worktree "$canonical" || ! cleanup_gitignore_fallback; then
-            report_checkout unverifiable "$wt" 'Git worktree identity or contents are unreadable' \
-                "HEAD=$head" git
-            return
+        # Planning may already hold this result from a parallel inspection.
+        if ! use_git_worktree_inspection "$canonical"; then
+            evaluate_git_worktree_proofs "$canonical"
         fi
-        if [ "$inspected_head" != "$head" ]; then
-            report_checkout protected "$wt" 'Git HEAD changed after inventory' \
-                "listed=$head live=$inspected_head" git
-            return
-        fi
-        [ -z "$inspected_status" ] || {
-            report_checkout protected "$wt" 'worktree contains tracked, non-ignored untracked, nested, or submodule state' \
-                "HEAD=$head; blocker-kind=${inspected_status_kind:-unknown}; first-status-or-path=${inspected_status_example:-unavailable}" git
-            return
-        }
-        # Eligibility is independent of branch tracking state. In particular,
-        # a clean HEAD anywhere in old default-branch history qualifies here.
-        git_integration_check_safe=1
-        worktree_integrated=0
-        git_tip_integrated "$head" && worktree_integrated=1
-        worktree_evidence=$integration_evidence
-        worktree_failure=$integration_failure_reason
-        if [ "$worktree_integrated" -ne 1 ] &&
-           [ "$remote_evidence_fresh" -eq 1 ] &&
-           git_head_is_merged_pr "$worktree_branch" "$head"; then
-            worktree_integrated=1
-            worktree_evidence='validated exact merged PR head and reachable merge commit'
-            git_integration_check_safe=1
-        fi
+        case "$git_proof_stage" in
+            identity|unreadable)
+                report_checkout unverifiable "$wt" 'Git worktree identity or contents are unreadable' \
+                    "HEAD=$head" git
+                return
+                ;;
+            head_changed)
+                report_checkout protected "$wt" 'Git HEAD changed after inventory' \
+                    "listed=$head live=$inspected_head" git
+                return
+                ;;
+            dirty)
+                report_checkout protected "$wt" 'worktree contains tracked, non-ignored untracked, nested, or submodule state' \
+                    "HEAD=$head; blocker-kind=${inspected_status_kind:-unknown}; first-status-or-path=${inspected_status_example:-unavailable}" git
+                return
+                ;;
+            anchors)
+                report_checkout protected "$wt" 'Git worktree index or recovery anchors are not proven retained' \
+                    "${admin_retirement_blocker:-HEAD=$head; real index proof failed}" git
+                return
+                ;;
+            history|clean) ;;
+            *)
+                report_checkout unverifiable "$wt" 'Checkout inspection failed' \
+                    "HEAD=$head; parallel inspection result is missing or malformed" git
+                return
+                ;;
+        esac
         if [ "$worktree_integrated" -ne 1 ]; then
             if [ "$remote_evidence_fresh" -ne 1 ]; then
                 report_checkout 'pending verification' "$wt" \
@@ -3278,16 +3740,6 @@ EOF
                 report_checkout protected "$wt" 'Git worktree history is not proven retained' \
                     "$worktree_failure" git
             fi
-            return
-        fi
-        admin_retirement_blocker=
-        # `git worktree remove` deletes the whole admin dir, so every entry in
-        # it (per-worktree refs, ORIG_HEAD, in-progress operation state,
-        # `config.worktree`, reflogs) must pass the same allowlist as JJ.
-        if ! git_worktree_index_is_retained "$inspected_git_admin" "$head" ||
-           ! git_admin_has_only_retained_state "$inspected_git_admin" "$head"; then
-            report_checkout protected "$wt" 'Git worktree index or recovery anchors are not proven retained' \
-                "${admin_retirement_blocker:-HEAD=$head; real index proof failed}" git
             return
         fi
         if [ -n "$worktree_branch" ] &&
@@ -3369,9 +3821,16 @@ EOF
     # time avoids human-oriented output; unusual paths that Git C-quotes (or
     # that contain ledger delimiters) are detected and skipped fail-closed.
     process_git_worktree_inventory() {
+        first=1
+        wt=
+        head=
+        worktree_branch=
+        locked=0
+        prunable=0
+        quoted_worktree_path=0
         while IFS= read -r line; do
             if [ -z "$line" ]; then
-                process_git_worktree
+                "$1"
                 wt=
                 head=
                 worktree_branch=
@@ -3392,13 +3851,16 @@ EOF
                 esac
             fi
         done
-        process_git_worktree
+        "$1"
     }
 
     if [ -n "${git_worktree_inventory-}" ]; then
-        process_git_worktree_inventory < "$git_worktree_inventory"
+        # Start the read-only inspections that the serial pass consumes.
+        process_git_worktree_inventory prefetch_git_worktree < "$git_worktree_inventory"
+        process_git_worktree_inventory process_git_worktree < "$git_worktree_inventory"
+        wait_for_inspection_jobs
     else
-        git worktree list --porcelain | process_git_worktree_inventory
+        git worktree list --porcelain | process_git_worktree_inventory process_git_worktree
     fi
 
     # Missing registrations are retired individually by their validated
@@ -3521,6 +3983,139 @@ EOF
     # JJ workspace, stack, and bookmark cleanup
     # ----------------------------------------------------------------------
 
+    # Read-only proofs for workspace $2 at $1, inventoried at `@` $3 with
+    # registrations $4: history of that `@` first, then the colocated Git
+    # registration, then the disk-tree proof. Sets jj_proof_stage to the
+    # stage that stopped, or `disk` once the disk proof ran (disk_proof_ok
+    # and disk_tree_blocker hold its result). A planning job passes `job`
+    # so that it rechecks the workspace identity itself.
+    evaluate_jj_workspace_proofs() {
+        jj_proof_stage=identity
+        jj_integration_check_safe=1
+        jj_integration_evidence=
+        jj_integration_failure='no exact retained-history proof'
+        workspace_is_git=0
+        git_head=-
+        plan_jj_git_admin=
+        admin_retirement_blocker=
+        disk_proof_ok=0
+        disk_tree_blocker=
+        jj_disk_proof_evidence=
+        if [ "${5-}" = job ]; then
+            verify_jj_workspace_identity "$1" "$2" "$3" || return 0
+        fi
+        jj_proof_stage=history
+        jj_history_gate "$1" "$3" || return 0
+        proof_tip_evidence=$jj_integration_evidence
+        jj_proof_stage=registration
+        if [ -e "$1/.git" ] || [ -L "$1/.git" ] || [ "$4" = 'git,jj' ]; then
+            workspace_is_git=1
+            plan_jj_git_admin=$(registered_git_dir_for_worktree "$1") &&
+                jj_gitfile_is_bound "$1" "$plan_jj_git_admin" &&
+                git_head=$(git --git-dir="$plan_jj_git_admin" rev-parse --verify HEAD 2>/dev/null) &&
+                jj_git_registration_is_retained "$1" "$plan_jj_git_admin" "$git_head" ||
+                return 0
+        fi
+        # Plain dry-run can prove retained disk contents without a JJ
+        # snapshot. Unsafe Git normalization blocks both paths.
+        jj_proof_stage=disk
+        jj_workspace_disk_tree_proof "$1" "$3" "$plan_jj_git_admin" || return 0
+        jj_disk_proof_evidence="$proof_disk_evidence; @ ${proof_tip_evidence:-exact integration proof}"
+        disk_proof_ok=1
+    }
+
+    # Invoked through start_inspection_job.
+    # shellcheck disable=SC2329
+    inspect_jj_workspace_job() {
+        evaluate_jj_workspace_proofs "$@" job
+        # shellcheck disable=SC2086
+        save_inspection_values $jj_inspection_values
+    }
+
+    # Start a planning job for each workspace that the loop below would
+    # evaluate, after the same gates, in inventory order.
+    prefetch_jj_workspaces() {
+        prefetch_index=0
+        while [ "$prefetch_index" -lt "$jj_workspace_count" ]; do
+            prefetch_name=$(jq -r -s --argjson i "$prefetch_index" '.[$i].name' "$jj_workspaces") &&
+                prefetch_tip=$(jq -r -s --argjson i "$prefetch_index" '.[$i].target' "$jj_workspaces") &&
+                prefetch_path=$(jq -r -s --argjson i "$prefetch_index" '.[$i].root // ""' "$jj_workspaces") ||
+                return 0
+            prefetch_index=$((prefetch_index + 1))
+            [ "$prefetch_name" != default ] && [ -n "$prefetch_path" ] || continue
+            [ -z "${primary_worktree-}" ] || [ "$prefetch_path" != "$primary_worktree" ] || continue
+            ! path_is_temporary "$prefetch_path" && [ -d "$prefetch_path" ] || continue
+            prefetch_canonical=$(cd "$prefetch_path" 2>/dev/null && pwd -P) || continue
+            case "$prefetch_canonical" in
+                *"$(printf '\t')"*|*"$(printf '\r')"*|*'
+'*) continue ;;
+            esac
+            [ "$prefetch_canonical" != "$jj_current_root" ] &&
+                [ "$prefetch_canonical" != "$current_git_root" ] &&
+                [ -f "$prefetch_canonical/.jj/repo" ] || continue
+            prefetch_registrations=jj
+            if [ -n "${deferred_git_worktrees-}" ] &&
+               grep -Fx -- "$prefetch_canonical" "$deferred_git_worktrees" >/dev/null 2>&1; then
+                prefetch_registrations='git,jj'
+            fi
+            start_inspection_job jj "$prefetch_canonical" \
+                "$prefetch_tip/$prefetch_name/$prefetch_registrations" \
+                inspect_jj_workspace_job "$prefetch_canonical" "$prefetch_name" \
+                "$prefetch_tip" "$prefetch_registrations" || true
+        done
+    }
+
+    # As use_git_worktree_inspection, for workspace $2 at $1 with `@` $3 and
+    # registrations $4.
+    use_jj_workspace_inspection() {
+        [ "$sweep_phase" = planning ] && [ "$inspection_job_count" -gt 0 ] || return 1
+        if ! find_inspection_job "$1" jj "$3/$2/$4"; then
+            wait_for_inspection_jobs
+            return 1
+        fi
+        # shellcheck disable=SC2086
+        consume_inspection_job "$found_inspection_job" $jj_inspection_values &&
+            jj_inspection_is_well_formed || jj_proof_stage=failed
+    }
+
+    jj_inspection_is_well_formed() {
+        case "$jj_integration_check_safe$workspace_is_git$disk_proof_ok" in
+            [01][01]0) ;;
+            [01][01]1) [ "$jj_proof_stage" = disk ] && [ -n "$jj_disk_proof_evidence" ] || return 1 ;;
+            *) return 1 ;;
+        esac
+        case "$jj_proof_stage" in
+            identity|history|registration) [ "$disk_proof_ok" -eq 0 ] ;;
+            disk)
+                [ "$workspace_is_git" -eq 0 ] && return 0
+                case "$plan_jj_git_admin" in "$git_common_dir"/worktrees/?*) ;; *) return 1 ;; esac
+                case "$git_head" in ''|*[!0-9a-f]*) return 1 ;; esac
+                [ "${#git_head}" -eq 40 ] || [ "${#git_head}" -eq 64 ]
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # Report a JJ `@` whose retained history is not proven.
+    report_jj_history_failure() {
+        protect_closed_heads_for_tip "$jj_root" "$2" || true
+        if [ "$remote_evidence_fresh" -ne 1 ]; then
+            closed_cleanup_safe=0
+            report_checkout 'pending verification' "$1" \
+                'JJ retained-history proof awaits fresh default-branch evidence' \
+                "$jj_integration_failure" "$jj_registrations"
+        elif [ "$jj_integration_check_safe" -ne 1 ]; then
+            closed_cleanup_safe=0
+            report_checkout unverifiable "$1" \
+                'JJ retained-history proof could not run safely' \
+                "$jj_integration_failure" "$jj_registrations"
+        else
+            report_checkout 'possible orphan' "$1" \
+                'JJ workspace history is not proven retained' \
+                "$jj_integration_failure" "$jj_registrations"
+        fi
+    }
+
     if command -v jj >/dev/null 2>&1; then
         jj_root=$(jj root 2>/dev/null || true)
         if [ -n "$jj_root" ]; then
@@ -3583,6 +4178,7 @@ EOF
             fi
 
             if [ "$workspace_inventory_ok" -eq 1 ]; then
+                prefetch_jj_workspaces
                 jj_workspace_index=0
                 while [ "$jj_workspace_index" -lt "$jj_workspace_count" ]; do
                     jj_name=$(jq -r -s --argjson i "$jj_workspace_index" '.[$i].name' "$jj_workspaces") || {
@@ -3717,30 +4313,44 @@ EOF
                         continue
                     fi
 
-                    workspace_is_git=0
-                    git_head=-
-                    plan_jj_git_admin=
-                    admin_retirement_blocker=
-                    if [ -e "$canonical/.git" ] || [ -L "$canonical/.git" ] ||
-                       [ "$jj_registrations" = 'git,jj' ]; then
-                        workspace_is_git=1
-                        if ! plan_jj_git_admin=$(registered_git_dir_for_worktree "$canonical") ||
-                           ! jj_gitfile_is_bound "$canonical" "$plan_jj_git_admin" ||
-                           ! git_head=$(git --git-dir="$plan_jj_git_admin" rev-parse --verify HEAD 2>/dev/null) ||
-                           ! jj_git_registration_is_retained "$canonical" "$plan_jj_git_admin" "$git_head"; then
+                    # History is decided first: a `@` that cannot authorize
+                    # removal needs no registration proof, file walk or
+                    # snapshot. Planning may already hold this result.
+                    if ! use_jj_workspace_inspection "$canonical" "$jj_name" \
+                        "$listed_jj_tip" "$jj_registrations"; then
+                        evaluate_jj_workspace_proofs "$canonical" "$jj_name" \
+                            "$listed_jj_tip" "$jj_registrations"
+                    fi
+                    case "$jj_proof_stage" in
+                        identity)
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            report_checkout unverifiable "$canonical" \
+                                'JJ workspace identity does not match inventory' \
+                                "workspace=$jj_name; target=$listed_jj_tip" "$jj_registrations"
+                            continue
+                            ;;
+                        history)
+                            report_jj_history_failure "$canonical" "$listed_jj_tip"
+                            continue
+                            ;;
+                        registration)
                             protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
                             report_checkout protected "$canonical" \
                                 'JJ/Git registration, HEAD, or index is not proven safe' \
                                 "${admin_retirement_blocker:+$admin_retirement_blocker; }workspace=$jj_name; target=$listed_jj_tip" "$jj_registrations"
                             continue
-                        fi
-                    fi
-
-                    # Plain dry-run can prove retained disk contents without a
-                    # JJ snapshot. Unsafe Git normalization blocks both paths.
-                    disk_proof_ok=0
-                    jj_workspace_disk_proof "$canonical" "$listed_jj_tip" "$plan_jj_git_admin" &&
-                        disk_proof_ok=1
+                            ;;
+                        disk) ;;
+                        *)
+                            protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
+                            closed_cleanup_safe=0
+                            report_checkout unverifiable "$canonical" 'Checkout inspection failed' \
+                                "workspace=$jj_name; target=$listed_jj_tip; parallel inspection result is missing or malformed" \
+                                "$jj_registrations"
+                            continue
+                            ;;
+                    esac
                     if [ -n "$disk_tree_blocker" ]; then
                         protect_closed_heads_for_tip "$jj_root" "$listed_jj_tip" || true
                         report_checkout protected "$canonical" 'JJ disk proof refused unsafe content' \
@@ -3952,22 +4562,7 @@ EOF
                     jj_workspace_integrated=0
                     jj_tip_integrated "$canonical" "$workspace_jj_tip" && jj_workspace_integrated=1
                     if [ "$jj_workspace_integrated" -ne 1 ]; then
-                        protect_closed_heads_for_tip "$jj_root" "$workspace_jj_tip" || true
-                        if [ "$remote_evidence_fresh" -ne 1 ]; then
-                            closed_cleanup_safe=0
-                            report_checkout 'pending verification' "$canonical" \
-                                'JJ retained-history proof awaits fresh default-branch evidence' \
-                                "$jj_integration_failure" "$jj_registrations"
-                        elif [ "$jj_integration_check_safe" -ne 1 ]; then
-                            closed_cleanup_safe=0
-                            report_checkout unverifiable "$canonical" \
-                                'JJ retained-history proof could not run safely' \
-                                "$jj_integration_failure" "$jj_registrations"
-                        else
-                            report_checkout 'possible orphan' "$canonical" \
-                                'JJ workspace history is not proven retained' \
-                                "$jj_integration_failure" "$jj_registrations"
-                        fi
+                        report_jj_history_failure "$canonical" "$workspace_jj_tip"
                         continue
                     fi
 
@@ -4036,6 +4631,7 @@ EOF
                             "workspace=$jj_name; target=$workspace_jj_tip" "$jj_registrations"
                     fi
                 done
+                wait_for_inspection_jobs
             fi
 
             # Stack/bookmark cleanup is last because every retained or failed

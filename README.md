@@ -107,7 +107,12 @@ policy.
 
 For non-temporary checkouts, **PRUNE** means cleanup evidence and safety checks
 pass. **RETAIN** explains the blocker, including uncertain history, dirty files,
-broken metadata, or a required snapshot.
+broken metadata, or a required snapshot. History is checked first: when a Git
+HEAD or JJ `@` lacks retained-history evidence, sweep reports that reason without
+reading the checkout's files, even if the checkout is also dirty. The read-only
+inspections run in parallel, up to eight at a time and no more than the CPU
+count, and the report keeps inventory order. An actual run still repeats every
+proof for each candidate, one at a time, immediately before removing it.
 
 For non-temporary checkouts, detached heads, deleted upstreams, and closed PRs
 alone do not authorize removal. A JJ commit message does not prevent removal:
@@ -233,10 +238,11 @@ shared-reference evidence still blocks dependent history abandonment. Missing
 non-temporary registrations are retained unless their history has a verified
 recovery anchor. Preview never forgets registrations or creates recovery refs.
 
-Integration evidence uses `origin`'s default branch. GitHub queries include up to
-1,000 merged PRs and 1,000 closed PRs; reaching either limit leaves completeness
-unverified. Closed-unmerged PRs remain report-only. Preview is selected with
-`--dry-run`; there are no sweep-specific environment settings.
+Integration evidence uses `origin`'s default branch. Sweep queries merged and
+closed PRs concurrently, starting with a limit of 1,000 each. A query whose
+result reaches its limit repeats with twice the limit; at the 64,000-PR ceiling,
+completeness stays unverified. Closed-unmerged PRs remain report-only. Preview is
+selected with `--dry-run`; there are no sweep-specific environment settings.
 
 ## About
 
