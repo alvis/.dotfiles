@@ -1,0 +1,4 @@
+# literal "~/" is intentional: mise [dotfiles] keys and user-facing messages
+disable=SC2088
+external-sources=true
+source-path=SCRIPTDIR

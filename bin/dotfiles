@@ -1,0 +1,1893 @@
+#!/usr/bin/env bash
+#
+# dotfiles — a thin wrapper around native mise commands for alvis/.dotfiles.
+#
+#   dotfiles install [options]       provision this machine (install.sh calls this)
+#   dotfiles link [--dry-run]        deploy the fundamental dotfiles safely
+#   dotfiles config <command>        manage personal settings in your .configs history
+#   dotfiles help
+#
+# Compatible with the bash 3.2 that ships with macOS.
+
+set -euo pipefail
+
+# resolve the real location of this script, following ~/.local/bin/dotfiles
+_self=${BASH_SOURCE[0]}
+while [ -L "$_self" ]; do
+  _link=$(readlink "$_self")
+  case $_link in
+  /*) _self=$_link ;;
+  *) _self=$(dirname "$_self")/$_link ;;
+  esac
+done
+DOTFILES_DIR=$(cd -P "$(dirname "$_self")/.." && pwd)
+export DOTFILES_DIR
+unset _self _link
+
+# shellcheck source=lib/common.sh
+. "$DOTFILES_DIR/lib/common.sh"
+# shellcheck source=lib/scan.sh
+. "$DOTFILES_DIR/lib/scan.sh"
+
+APPS_DIR=$DOTFILES_DIR/apps
+PREFS_STATE_DIR=$DOTFILES_STATE_DIR/prefs
+PREFS_POLICY=$PREFS_STATE_DIR/policy.json
+GUARD_MARKER=$DOTFILES_STATE_DIR/secret-guard.paused
+GUARD_STAMP=$DOTFILES_STATE_DIR/secret-guard.stamp
+INBOUND_MARKER=$DOTFILES_STATE_DIR/incoming-refused
+EXCHANGE_LOG=$DOTFILES_STATE_DIR/last-exchange.log
+EXCHANGE_MARKER=$DOTFILES_STATE_DIR/exchange-failed
+WATCH_LOG=$DOTFILES_STATE_DIR/watch.log
+BACKUP_ROOT=$DOTFILES_STATE_DIR/backups
+MIN_MISE_VERSION=2026.11.11
+PYTHON=${DOTFILES_PYTHON:-}
+
+DRY_RUN=${DRY_RUN:-0}
+ASSUME_YES=${ASSUME_YES:-0}
+
+python3_bin() {
+  if [ -n "$PYTHON" ]; then
+    printf '%s\n' "$PYTHON"
+  elif [ -x /usr/bin/python3 ] && [ "$(uname -s)" = Darwin ]; then
+    printf '%s\n' /usr/bin/python3
+  elif command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  else
+    die "python3 is required (macOS: xcode-select --install; Linux: install python3)"
+  fi
+}
+
+json_query() { # json_query <python expression over `d`> < json
+  "$(python3_bin)" -I -c 'import json,sys
+d=json.load(sys.stdin)
+r='"$1"'
+if isinstance(r,(list,tuple)):
+    print("\n".join(str(x) for x in r))
+elif r is not None:
+    print(r)'
+}
+
+# one backup directory per run; call without $(...) so the choice persists
+ensure_backup_dir() {
+  [ -n "${_BACKUP_DIR:-}" ] || _BACKUP_DIR=$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)-$$
+}
+
+# move a path into the backup directory, keeping its home-relative layout
+backup_path() {
+  local path=$1 dest
+  ensure_backup_dir
+  dest=$_BACKUP_DIR/${path#"$HOME"/}
+  act mkdir -p "$(dirname "$dest")"
+  act mv -- "$path" "$dest"
+  info "backed up $(tilde_path "$path") -> $(tilde_path "$dest")"
+}
+
+# //
+# REGISTRY
+# //
+
+app_file() {
+  local id=$1
+  printf '%s\n' "$id" | grep -Eq '^[a-z0-9][a-z0-9-]{0,40}$' || die "invalid application id: $id"
+  [ -f "$APPS_DIR/$id.toml" ] || die "unknown application: $id (see: dotfiles config list)"
+  printf '%s\n' "$APPS_DIR/$id.toml"
+}
+
+app_ids() {
+  local f
+  for f in "$APPS_DIR"/*.toml; do
+    [ -f "$f" ] || continue
+    basename "$f" .toml
+  done
+}
+
+app_get() { toml_get "$(app_file "$1")" "$2"; }
+app_list() { toml_get_list "$(app_file "$1")" "$2"; }
+
+app_supported_here() {
+  local os
+  os=$(platform_os)
+  app_list "$1" app.platforms | grep -qx "$os"
+}
+
+# the file mise tracks for an app's preference domain
+prefs_file_for() { printf '%s/%s.plist\n' "$PREFS_DIR" "$(app_get "$1" sync.domain)"; }
+
+# every path an enrolled app tracks
+app_tracked_paths() {
+  local id=$1 p
+  case "$(app_get "$id" sync.method)" in
+  defaults) prefs_file_for "$id" ;;
+  file)
+    app_list "$id" sync.paths | while IFS= read -r p; do expand_home "$p"; done
+    ;;
+  esac
+}
+
+# true when the manifest tracks the path
+manifest_tracks() {
+  local key
+  key=$(tilde_path "$1")
+  [ -f "$MISE_MANIFEST" ] || return 1
+  mise_cmd config get -f "$MISE_MANIFEST" "dotfiles.\"$key\".mode" 2>/dev/null | grep -Eq 'track'
+}
+
+app_enrolled() {
+  local id=$1 p any=1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    manifest_tracks "$p" && any=0
+  done <<EOF
+$(app_tracked_paths "$id")
+EOF
+  return $any
+}
+
+app_installed() {
+  local install
+  install=$(app_get "$1" app.install)
+  case $install in
+  brew-cask:*)
+    local bundle
+    bundle=$(app_get "$1" sync.bundle_id)
+    if [ -n "$bundle" ] && command -v mdfind >/dev/null 2>&1; then
+      [ -n "$(mdfind "kMDItemCFBundleIdentifier == '$bundle'" 2>/dev/null | head -1)" ] && return 0
+    fi
+    [ -d "$(brew_prefix)/Caskroom/${install#brew-cask:}" ]
+    ;;
+  brew:*) command -v "${install##*/}" >/dev/null 2>&1 || command -v "${install#brew:}" >/dev/null 2>&1 ;;
+  *) return 1 ;;
+  esac
+}
+
+# //
+# PREFERENCE DOMAINS (macOS)
+# //
+
+# rebuild the machine-local prefs policy from the registry and the manifest
+# one record per enrolled domain: id, name, domain, bundle id, reload, file,
+# then each denied key; fields separated by the unit separator (0x1f)
+prefs_policy_write() {
+  local id include=${2:-} us
+  [ "$(platform_os)" = macos ] || return 0
+  [ "${1:-}" = --include ] || include=''
+  us=$(printf '\037')
+  mkdir -p "$PREFS_STATE_DIR"
+  chmod 700 "$PREFS_STATE_DIR"
+  for id in $(app_ids); do
+    [ "$(app_get "$id" sync.method)" = defaults ] || continue
+    if [ "$id" != "$include" ]; then
+      manifest_tracks "$(prefs_file_for "$id")" || continue
+    fi
+    {
+      printf '%s' "$id" "$us" "$(app_get "$id" app.name)" "$us" "$(app_get "$id" sync.domain)" "$us" \
+        "$(app_get "$id" sync.bundle_id)" "$us" "$(app_get "$id" sync.reload)" "$us" "$(prefs_file_for "$id")"
+      app_list "$id" sync.deny_keys | while IFS= read -r k; do printf '%s%s' "$us" "$k"; done
+      printf '\n'
+    }
+  done | "$(python3_bin)" -I -c 'import json,os,sys
+apps=[]
+for line in sys.stdin.read().splitlines():
+    f=line.split("\x1f")
+    apps.append({"id":f[0],"name":f[1],"domain":f[2],"bundle_id":f[3],"reload":f[4],"file":f[5],"deny":f[6:]})
+path=sys.argv[1]
+with open(path+".tmp","w") as h:
+    json.dump({"state_dir":sys.argv[2],"apps":apps},h,indent=1)
+os.replace(path+".tmp",path)' "$PREFS_POLICY" "$PREFS_STATE_DIR"
+}
+
+prefs_py() { "$(python3_bin)" -I "$DOTFILES_DIR/lib/prefs.py" "$@"; }
+
+# Rebuild the policy when the manifest changed: a pull can enroll an app that
+# another Mac added, and its domain must be reconciled here too.
+prefs_policy_refresh() {
+  if [ -f "$PREFS_POLICY" ] && ! [ "$MISE_MANIFEST" -nt "$PREFS_POLICY" ] && ! [ "$DOTFILES_DIR/apps" -nt "$PREFS_POLICY" ]; then
+    return 0
+  fi
+  prefs_policy_write
+}
+
+cmd_prefs() {
+  local sub=${1:-}
+  shift || true
+  [ "$(platform_os)" = macos ] || die "preference domains exist on macOS only"
+  case $sub in
+  tick)
+    prefs_policy_refresh
+    prefs_py tick --policy "$PREFS_POLICY"
+    ;;
+  watch) cmd_watch ;;
+  keys)
+    [ -n "${1:-}" ] || die "usage: dotfiles prefs keys <app>"
+    prefs_policy_write --include "$1"
+    prefs_py keys --policy "$PREFS_POLICY" --app "$1"
+    ;;
+  *) die "usage: dotfiles prefs tick|watch|keys <app>" ;;
+  esac
+}
+
+# //
+# NAMED APPLICATION ACTIONS
+# //
+#
+# Registry files can only name these actions; they never carry shell code.
+
+# //
+# BACKGROUND SERVICE AND SECRET GUARD
+# //
+
+# The dotfiles-watch user service. Every interval it reconciles macOS
+# preference domains and checks tracked files for secrets, so that a secret
+# written after enrollment pauses publishing instead of reaching the origin.
+# The guard runs every 15 seconds, inside mise's 30-second save debounce, so
+# a secret is usually caught before its checkpoint exists.
+cmd_watch() {
+  local tick=${DOTFILES_WATCH_INTERVAL:-15} every n=0 last=0 now
+  every=$(sync_interval_seconds)
+  mkdir -p "$DOTFILES_STATE_DIR"
+  trap 'exit 0' TERM INT
+  # the service manager discards a LaunchAgent's output, so keep a log
+  if ! [ -t 2 ]; then
+    watch_log_rotate
+    exec 2>>"$WATCH_LOG"
+  fi
+  while :; do
+    if [ "$(platform_os)" = macos ] && [ $((n % 4)) = 0 ]; then
+      { prefs_policy_refresh && prefs_py tick --policy "$PREFS_POLICY" >/dev/null; } ||
+        printf '%s preferences sync failed (exit %s)\n' "$(date '+%F %T')" "$?" >&2
+    fi
+    guard_check >/dev/null || true
+    now=$(date +%s)
+    # without a .configs origin there is nothing to exchange
+    if [ $((now - last)) -ge "$every" ] && [ -n "$(local_origin)" ]; then
+      last=$now
+      watch_log_rotate
+      # a subshell, so that a failed exchange (die) never ends the service
+      if (cmd_config_sync) >"$EXCHANGE_LOG" 2>&1; then
+        rm -f "$EXCHANGE_MARKER"
+      else
+        exchange_failed
+      fi
+    fi
+    n=$((n + 1))
+    sleep "$tick"
+  done
+}
+
+# keep the service log small: start over past 1 MB
+watch_log_rotate() {
+  local kb
+  [ -f "$WATCH_LOG" ] || return 0
+  kb=$(du -k "$WATCH_LOG" 2>/dev/null | awk '{print $1}')
+  [ "${kb:-0}" -le 1024 ] || mv -f "$WATCH_LOG" "$WATCH_LOG.1"
+}
+
+# a background exchange failed: record why, and say so once per outage
+exchange_failed() {
+  local why
+  why=$(grep -E '^(ERROR|mise ERROR)' "$EXCHANGE_LOG" | head -1 | sed 's/\x1b\[[0-9;]*m//g')
+  [ -n "$why" ] || why=$(tail -1 "$EXCHANGE_LOG")
+  printf '%s %s\n' "$(date '+%F %T')" "$why" >&2
+  if ! [ -f "$EXCHANGE_MARKER" ]; then
+    notify_user ".configs sync failed" "Run: dotfiles config status"
+  fi
+  printf '%s %s\n' "$(date '+%F %T')" "$why" >"$EXCHANGE_MARKER"
+}
+
+# seconds between exchanges: DOTFILES_SYNC_INTERVAL, else mise's
+# history.sync_interval setting (5m by default)
+sync_interval_seconds() {
+  local v=${DOTFILES_SYNC_INTERVAL:-} n
+  [ -n "$v" ] || v=$(mise_cmd settings get history.sync_interval 2>/dev/null || true)
+  n=$(printf '%s' "$v" | tr -cd '0-9')
+  [ -n "$n" ] || n=0
+  case $v in
+  *ms) n=1 ;;
+  *h) n=$((n * 3600)) ;;
+  *m) n=$((n * 60)) ;;
+  esac
+  [ "$n" -ge 1 ] 2>/dev/null || n=300
+  echo "$n"
+}
+
+# absolute paths of everything tracked (mise reports paths in the home as ~/...)
+tracked_paths() {
+  mise_cmd dot paths --json 2>/dev/null | json_query '[__import__("os").path.expanduser(e["path"]) for e in d.get("entries", [])]'
+}
+
+# guard_check: scan tracked files changed since the last check; pause
+# publishing when one looks like it holds a secret (status 1)
+guard_check() {
+  local paths p changed=0 findings
+  [ -n "$(local_origin)" ] || return 0
+  if [ -f "$GUARD_MARKER" ]; then
+    warn "publishing is paused by the secret guard (see: dotfiles config status)"
+    return 1
+  fi
+  # an early warning only: the exchange scans everything it would publish
+  paths=$(tracked_paths) || return 0
+  if [ -f "$GUARD_STAMP" ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      if [ -d "$p" ]; then
+        [ -z "$(find "$p" -newer "$GUARD_STAMP" -type f 2>/dev/null | head -1)" ] || changed=1
+      elif [ "$p" -nt "$GUARD_STAMP" ]; then
+        changed=1
+      fi
+    done <<EOF
+$paths
+EOF
+  else
+    changed=1
+  fi
+  [ $changed = 1 ] || return 0
+  mkdir -p "$DOTFILES_STATE_DIR"
+  # stamp before scanning, so an edit made during the scan is checked next time
+  touch "$GUARD_STAMP"
+  findings=$(printf '%s\n' "$paths" | while IFS= read -r p; do [ -n "$p" ] && scan_files "$p"; done || true)
+  [ -n "$findings" ] || return 0
+  guard_pause "$findings"
+}
+
+guard_pause() {
+  local findings=$1
+  mkdir -p "$DOTFILES_STATE_DIR"
+  # rule names and paths only; the scanner never prints a matched value
+  printf '%s\n' "$findings" >"$GUARD_MARKER"
+  err "possible secret in what would be published; publishing to .configs is paused:"
+  printf '%s\n' "$findings" | sed 's/^/      /' >&2
+  case $findings in
+  *history:*)
+    info "a saved checkpoint that was never published holds it. Remove it from the file, then either:"
+    info "    mise dot history purge <path>         (a file that was never published)"
+    info "    dotfiles config adopt $(local_origin | redact) --replace-history"
+    info "                                          (discard this machine's unpublished checkpoints; files stay)"
+    ;;
+  *) info "remove it from the file, then run: dotfiles config sync" ;;
+  esac
+  notify_user "Settings sync paused" "A tracked file looks like it holds a secret. Run: dotfiles config status"
+  return 1
+}
+
+# notify_user <title> <message>: fixed strings only, never file content
+notify_user() {
+  [ "$(platform_os)" = macos ] || return 0
+  osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+
+# //
+# PUBLISH AND INCOMING GATES
+# //
+
+# The synced manifest (~/.config/mise/config.toml) is mise's global config,
+# which mise applies on every machine without `mise trust`. So only tracking
+# entries for registry paths and a few history settings may come from
+# .configs; anything else (env, hooks, tasks, tools, reload commands,
+# plaintext bypasses, other paths) is refused before it is published or
+# applied.
+policy_allowed_paths() {
+  local id p
+  tilde_path "$MISE_MANIFEST"
+  for id in $(app_ids); do
+    [ "$(app_get "$id" sync.strategy)" = auto ] || continue
+    app_tracked_paths "$id" | while IFS= read -r p; do tilde_path "$p"; done
+  done
+}
+
+# manifest_policy <toml file>: print each refused key (names only); status 1
+# when any. mise parses the file; its normalized output is checked.
+manifest_policy() {
+  local file=$1 normalized
+  [ -f "$file" ] || return 0
+  normalized=$(mise_cmd config get -f "$file" 2>/dev/null) || {
+    echo "(the file is not valid TOML)"
+    return 1
+  }
+  printf '%s\n' "$normalized" | POLICY_ALLOWED=$(policy_allowed_paths) awk '
+    BEGIN {
+      n = split(ENVIRON["POLICY_ALLOWED"], a, "\n")
+      for (i = 1; i <= n; i++) if (a[i] != "") ok["dotfiles.\"" a[i] "\""] = 1
+      bad = 0
+    }
+    function refuse(what) { print what; bad = 1 }
+    /"""/ || /\047\047\047/ { refuse("(multi-line string)"); next }
+    /^\[\[/ { refuse($0); next }
+    /^\[/ {
+      table = $0
+      sub(/^\[/, "", table)
+      sub(/\][[:space:]]*$/, "", table)
+      if (!(table in ok) && table != "dotfiles" && table != "history" && table != "settings" && table != "settings.history" && table != "settings.history.watch")
+        refuse("[" table "]")
+      next
+    }
+    /^[^[:space:]\]]/ {
+      key = $0
+      sub(/[[:space:]]*=.*$/, "", key)
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      if (table == "" && key == "min_version") next
+      if (table in ok) {
+        if (key == "mode" && value == "\"track\"") next
+        if (key == "encrypt" && (value == "true" || value == "false")) next
+      }
+      if (table == "history" && (key == "exclude" || key == "include" || key == "git_email")) next
+      if (table == "settings.history" && (key == "sync_interval" || key == "fetch_interval")) next
+      if (table == "settings.history.watch" && key == "debounce") next
+      refuse(table == "" ? key : table "." key)
+    }
+    END { exit bad }'
+}
+
+# checkpoints a push would publish: everything not yet on the origin
+scan_unpublished() { scan_history "$(history_repo)" HEAD --not --remotes; }
+
+# publish_gate: nothing is pushed unless the tracked files and every
+# unpublished checkpoint are free of findings and the manifest passes policy
+publish_gate() {
+  local findings='' rc=0 violations p
+  findings=$(tracked_paths | while IFS= read -r p; do [ -n "$p" ] && scan_files "$p"; done || true)
+  if [ -z "$findings" ]; then
+    findings=$(scan_unpublished) || rc=$?
+    [ $rc != 2 ] || findings="history: the saved history could not be scanned"
+  fi
+  if [ -n "$findings" ]; then
+    guard_pause "$findings"
+    return 1
+  fi
+  if ! violations=$(manifest_policy "$MISE_MANIFEST"); then
+    err "$(tilde_path "$MISE_MANIFEST") declares settings that .configs must not carry; nothing was published:"
+    printf '%s\n' "$violations" | sed 's/^/      /' >&2
+    info "keep machine-local mise settings and tools in $(tilde_path "$MISE_LOCAL_CONFIG")"
+    return 1
+  fi
+  rm -f "$GUARD_MARKER"
+  mkdir -p "$DOTFILES_STATE_DIR"
+  touch "$GUARD_STAMP"
+}
+
+# the fetched origin branch (mise keeps exactly one remote-tracking ref)
+incoming_ref() {
+  local refs
+  refs=$(git --git-dir="$(history_repo)" for-each-ref --format='%(refname)' refs/remotes/ 2>/dev/null) || return 1
+  [ -n "$refs" ] && [ "$(printf '%s\n' "$refs" | wc -l | tr -d ' ')" = 1 ] || return 1
+  printf '%s\n' "$refs"
+}
+
+# incoming_policy: the configuration the next pull would apply passes policy
+incoming_policy() {
+  local repo ref extra tmp out rc=0
+  repo=$(history_repo)
+  ref=$(incoming_ref) || {
+    echo "(the fetched history could not be identified)"
+    return 1
+  }
+  extra=$(git --git-dir="$repo" ls-tree -r --name-only "$ref" -- config/ 2>/dev/null | grep -vx 'config/config.toml' || true)
+  if [ -n "$extra" ]; then
+    printf '%s (unexpected configuration file)\n' "$extra"
+    return 1
+  fi
+  git --git-dir="$repo" cat-file -e "$ref:config/config.toml" 2>/dev/null || return 0
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-policy.XXXXXX")
+  git --git-dir="$repo" show "$ref:config/config.toml" >"$tmp/config.toml" 2>/dev/null || rc=2
+  [ $rc = 0 ] && { out=$(manifest_policy "$tmp/config.toml") || rc=1; }
+  rm -rf "$tmp"
+  [ $rc != 2 ] || out="(the incoming manifest could not be read)"
+  [ -z "${out:-}" ] || printf '%s\n' "$out"
+  [ $rc = 0 ]
+}
+
+# guard_resume: lift the pause once neither the files nor the saved history
+# contain a finding
+
+app_action() {
+  case $1 in
+  git-split-shared) action_git_split_shared ;;
+  *) die "unknown application action: $1" ;;
+  esac
+}
+
+# keep ~/.gitconfig personal: the .dotfiles include lives in ~/.config/git/config
+action_git_split_shared() {
+  local include=$DOTFILES_DIR/configs/git/config.conf
+  if [ -f "$HOME/.gitconfig" ] && git config --file "$HOME/.gitconfig" --get-all include.path 2>/dev/null |
+    grep -Eq '(^|/)\.dotfiles/configs/git/config\.conf$'; then
+    local dest
+    ensure_backup_dir
+    dest=$_BACKUP_DIR/.gitconfig
+    act mkdir -p "$(dirname "$dest")"
+    act cp -p "$HOME/.gitconfig" "$dest"
+    info "backed up ~/.gitconfig -> $(tilde_path "$dest")"
+    act git config --file "$HOME/.gitconfig" --unset-all include.path '(^|/)\.dotfiles/configs/git/config\.conf$'
+    info "moved the .dotfiles aliases include from ~/.gitconfig to ~/.config/git/config ($include)"
+  fi
+  git_shared_config
+  git_identity_home
+}
+
+# While ~/.gitconfig does not exist, `git config --global` writes to
+# ~/.config/git/config, which never syncs. Create ~/.gitconfig when Git is
+# enrolled, and move an identity Git already wrote there into it.
+git_identity_home() {
+  local xdg=$XDG_CONFIG_HOME/git/config dest key value
+  [ ! -e "$HOME/.gitconfig" ] || return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "[dry-run] create ~/.gitconfig, so 'git config --global' writes the synced file"
+  else
+    printf '%s\n' '# personal Git settings, synced through .configs' \
+      '# (machine-specific ones live in ~/.config/git/config)' >"$HOME/.gitconfig"
+  fi
+  [ -f "$xdg" ] && git config --file "$xdg" --get-regexp '^user\.' >/dev/null 2>&1 || return 0
+  ensure_backup_dir
+  dest=$_BACKUP_DIR/.config/git/config
+  act mkdir -p "$(dirname "$dest")"
+  act cp -p "$xdg" "$dest"
+  git config --file "$xdg" --get-regexp '^user\.' | while read -r key value; do
+    act git config --file "$HOME/.gitconfig" --add "$key" "$value"
+  done
+  act git config --file "$xdg" --remove-section user
+  info "moved your Git identity ([user]) from ~/.config/git/config to ~/.gitconfig, so it syncs (backup: $(tilde_path "$dest"))"
+}
+
+# a key's values from both global Git files; `git config --global` reads only
+# ~/.gitconfig whenever it exists, though Git itself reads both
+git_global_get_all() {
+  local f
+  for f in "$HOME/.gitconfig" "$XDG_CONFIG_HOME/git/config"; do
+    [ -f "$f" ] && git config --file "$f" --get-all "$1" 2>/dev/null
+  done
+  return 0
+}
+
+# the machine-local, .dotfiles-owned part of the global git configuration
+git_shared_config() {
+  local file=$XDG_CONFIG_HOME/git/config
+  act mkdir -p "$(dirname "$file")"
+  act sh "$DOTFILES_DIR/configs/git/setup.sh" --file "$file"
+  if [ -z "$(git_global_get_all core.excludesfile)" ]; then
+    act git config --file "$file" core.excludesfile '~/.gitignore_global'
+  fi
+  # what `git lfs install` would write, kept out of the personal ~/.gitconfig
+  if command -v git-lfs >/dev/null 2>&1 && [ -z "$(git_global_get_all filter.lfs.process)" ]; then
+    act git config --file "$file" filter.lfs.clean 'git-lfs clean -- %f'
+    act git config --file "$file" filter.lfs.smudge 'git-lfs smudge -- %f'
+    act git config --file "$file" filter.lfs.process 'git-lfs filter-process'
+    act git config --file "$file" filter.lfs.required true
+  fi
+}
+
+# GitHub credentials for Git, usable by the background watcher
+git_github_credentials() {
+  local gh file=$XDG_CONFIG_HOME/git/config
+  gh=$(gh_bin) || return 1
+  if git config --file "$file" --get-all credential.https://github.com.helper 2>/dev/null | grep -Fq " auth git-credential"; then
+    if git config --file "$file" --get-all credential.https://github.com.helper | grep -Fq "!$gh auth git-credential"; then
+      return 0
+    fi
+  fi
+  act git config --file "$file" --unset-all credential.https://github.com.helper 2>/dev/null || true
+  act git config --file "$file" --add credential.https://github.com.helper ''
+  act git config --file "$file" --add credential.https://github.com.helper "!$gh auth git-credential"
+  info "Git uses the GitHub CLI for github.com credentials (in ~/.config/git/config)"
+}
+
+gh_bin() {
+  local candidate
+  for candidate in "$(brew_prefix)/bin/gh" /usr/local/bin/gh /opt/homebrew/bin/gh /usr/bin/gh; do
+    [ -x "$candidate" ] && {
+      printf '%s\n' "$candidate"
+      return 0
+    }
+  done
+  command -v gh 2>/dev/null || return 1
+}
+
+# //
+# FUNDAMENTAL DOTFILES
+# //
+
+# the old setup's links to files this checkout no longer has
+LEGACY_LINKS=".dotfilesrc .mackup .mackup.cfg"
+
+# move aside the legacy links that now dangle into this checkout
+remove_legacy_links() {
+  local name path target dir
+  for name in $LEGACY_LINKS; do
+    path=$HOME/$name
+    if ! [ -L "$path" ] || [ -e "$path" ]; then continue; fi
+    target=$(readlink "$path")
+    case $target in
+    /*) ;;
+    *) target=$HOME/$target ;;
+    esac
+    # compare physical paths: the link may name the checkout through a symlink
+    dir=$(cd -P "$(dirname "$target")" 2>/dev/null && pwd) || continue
+    [ "$dir" = "$DOTFILES_DIR" ] && backup_path "$path"
+  done
+}
+
+# classify every symlink entry of the blueprint and clear conflicts with backups
+cmd_link() {
+  local apply=1 status target source _reason real_src real_tgt pending=0 plan
+  # shellcheck disable=SC2034 # reason is read to keep the fields aligned
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --dry-run) DRY_RUN=1 ;;
+    --yes | -y) ASSUME_YES=1 ;;
+    --check) apply=0 ;;
+    *) die "usage: dotfiles link [--dry-run] [--check] [--yes]" ;;
+    esac
+    shift
+  done
+  # running this checkout's own command is consent to read its blueprint
+  if [ "$DRY_RUN" = 1 ]; then
+    info "[dry-run] mise trust $(tilde_path "$DOTFILES_DIR/mise.toml") (the preview below may warn that it is untrusted)"
+  else
+    mise_cmd trust --quiet "$DOTFILES_DIR/mise.toml" >/dev/null 2>&1 || true
+  fi
+  status=$(mise_cmd -C "$DOTFILES_DIR" dot status --json 2>/dev/null) || die "mise cannot read $DOTFILES_DIR/mise.toml (run: mise trust $DOTFILES_DIR)"
+  plan=$(printf '%s' "$status" | json_query '[ "\x1f".join([f["target"], f.get("source") or "", f["state"], f.get("reason") or ""]) for f in d.get("files", []) if f.get("mode") in ("symlink",) ]')
+  log "fundamental dotfiles"
+  remove_legacy_links
+  while IFS=$'\037' read -r target source status _reason; do
+    [ -n "$target" ] || continue
+    target=$(expand_home "$target")
+    # mise compares the link text, so a link through a directory that no longer
+    # exists (the old setup's ~/.dotfiles/setup/../.common.zshrc) counts as applied
+    if [ "$status" = applied ] && [ -L "$target" ] && ! [ -e "$target" ]; then
+      status=broken
+    fi
+    case $status in
+    applied) dim "    ok        $(tilde_path "$target")" ;;
+    missing) info "create    $(tilde_path "$target")" ;;
+    *)
+      if [ -L "$target" ]; then
+        real_src=$(real_path "$source" 2>/dev/null || printf '%s' "$source")
+        if [ -e "$target" ] && real_tgt=$(real_path "$target" 2>/dev/null) && [ "$real_tgt" = "$real_src" ]; then
+          info "relink    $(tilde_path "$target") (already points to this checkout)"
+        elif ! [ -e "$target" ]; then
+          info "broken    $(tilde_path "$target") -> $(readlink "$target")"
+          backup_path "$target"
+        else
+          warn "$(tilde_path "$target") links to $(readlink "$target"), not this checkout"
+          if confirm "Move that link aside (backed up) and link $(tilde_path "$target") to .dotfiles?"; then
+            backup_path "$target"
+          else
+            pending=1
+          fi
+        fi
+      elif [ -e "$target" ]; then
+        if [ -f "$target" ] && [ -f "$source" ] && cmp -s "$target" "$source"; then
+          info "replace   $(tilde_path "$target") (identical copy)"
+          backup_path "$target"
+        else
+          warn "$(tilde_path "$target") is your own file, not a link to .dotfiles"
+          if confirm "Move $(tilde_path "$target") aside (backed up) and link it to .dotfiles?"; then
+            backup_path "$target"
+          else
+            pending=1
+          fi
+        fi
+      fi
+      ;;
+    esac
+  done <<EOF
+$plan
+EOF
+  if [ $pending = 1 ]; then
+    warn "some dotfiles were left as they are; re-run 'dotfiles link' to link them"
+    return 1
+  fi
+  [ $apply = 1 ] || return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    # mise's own preview would still see the files planned to move aside
+    [ -n "${_BACKUP_DIR:-}" ] || mise_cmd -C "$DOTFILES_DIR" dot apply --dry-run
+    return 0
+  fi
+  mise_cmd -C "$DOTFILES_DIR" dot apply
+}
+
+# //
+# BOOTSTRAP STEPS ([tasks.bootstrap] runs this after every mise bootstrap)
+# //
+
+cmd_bootstrap_steps() {
+  local os brewbin
+  os=$(platform_os)
+  brewbin=$(brew_prefix)/bin/brew
+
+  git_shared_config
+  [ "$os" != macos ] || gpg_agent_config
+  [ "$os" != linux ] || zshrc_load_common
+
+  # DOTFILES_OFFLINE=1 (tests): nothing that needs the network or changes
+  # anything outside $HOME, such as Homebrew services and permissions
+  [ "${DOTFILES_OFFLINE:-0}" = 0 ] || return 0
+
+  if [ "$os" = macos ]; then
+    brew_intel_fallback
+    # spacemacs as emacs's configuration (macOS only, as before)
+    if [ ! -e "$HOME/.emacs.d" ]; then
+      act git clone --quiet --branch develop https://github.com/syl20bnr/spacemacs "$HOME/.emacs.d"
+    fi
+    # emacs as a background service
+    if [ -x "$brewbin" ] && "$brewbin" list --formula emacs >/dev/null 2>&1; then
+      if ! "$brewbin" services list 2>/dev/null | awk '$1 == "emacs" { print $2 }' | grep -qx started; then
+        act "$brewbin" services start emacs || warn "could not start the emacs service"
+      fi
+    fi
+    # zsh refuses group-writable completion directories
+    if [ -n "$(find "$(brew_prefix)/share/zsh" "$(brew_prefix)/share" -maxdepth 0 -perm -g+w 2>/dev/null)" ]; then
+      act chmod go-w "$(brew_prefix)/share"
+      act chmod -R go-w "$(brew_prefix)/share/zsh"
+    fi
+  fi
+
+  # GitHub CLI dashboard extension, once gh is signed in
+  if gh=$(gh_bin) && "$gh" auth status --hostname github.com >/dev/null 2>&1; then
+    if ! "$gh" extension list 2>/dev/null | grep -q 'dlvhdr/gh-dash'; then
+      act "$gh" extension install dlvhdr/gh-dash || warn "could not install gh-dash"
+    fi
+  fi
+}
+
+# Intel Macs: mise skips brew: formulae there, so install them with Homebrew
+brew_intel_fallback() {
+  local brewbin missing
+  [ "$(platform_arch)" = x64 ] || return 0
+  brewbin=$(brew_prefix)/bin/brew
+  [ -x "$brewbin" ] || die "Homebrew is required on Intel Macs (install.sh installs it)"
+  missing=$(mise_cmd -C "$DOTFILES_DIR" bootstrap packages status --json 2>/dev/null |
+    json_query '[p["package"] for p in d.get("brew", {}).get("packages", []) if p.get("state") != "installed"]') || true
+  [ -n "$missing" ] || return 0
+  log "installing Homebrew formulae on this Intel Mac"
+  # shellcheck disable=SC2086
+  act env HOMEBREW_NO_ASK=1 "$brewbin" install $missing
+}
+
+# Third-party tap formulae, installed with Homebrew itself on macOS: Homebrew
+# reads taps with git, while mise would spend anonymous GitHub API calls and
+# provision Ruby to evaluate them (see the note in mise.toml)
+# (Homebrew core's own "flux" is an unrelated InfluxData query language)
+BREW_TAP_FORMULAE="xo/xo/usql blendle/blendle/kns potatolabs/git-redate/git-redate fluxcd/tap/flux"
+
+brew_tap_formulae() {
+  local brewbin f missing=''
+  brewbin=$(brew_prefix)/bin/brew
+  if ! [ -x "$brewbin" ]; then
+    warn "Homebrew is missing, so these were not installed: $BREW_TAP_FORMULAE"
+    return 0
+  fi
+  for f in $BREW_TAP_FORMULAE; do
+    "$brewbin" list --formula "${f##*/}" >/dev/null 2>&1 || missing="$missing $f"
+  done
+  [ -n "$missing" ] || return 0
+  log "installing tap formulae with Homebrew:$missing"
+  for f in $missing; do
+    # Homebrew 7 asks before installing dependencies; the installer already has consent
+    act env HOMEBREW_NO_ASK=1 "$brewbin" install "$f" || warn "could not install $f (retry: brew install $f)"
+  done
+}
+
+# Linux: keep ~/.zshrc (often a container image's own) and make it load the
+# shared ~/.common.zshrc; the linked .zshrc is the macOS layer
+zshrc_load_common() {
+  local rc=$HOME/.zshrc
+  # also true when ~/.zshrc is a link to the macOS layer, which loads it itself
+  [ -f "$rc" ] && grep -Fq '.common.zshrc' "$rc" && return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "[dry-run] append 'source ~/.common.zshrc' to ~/.zshrc"
+    return 0
+  fi
+  printf '\n# shell setup from .dotfiles\nsource ~/.common.zshrc\n' >>"$rc"
+  info "~/.zshrc now loads the shared ~/.common.zshrc"
+}
+
+# gpg-agent: macOS pinentry and the cache limits git authorize-sign relies on
+gpg_agent_config() {
+  local conf=$HOME/.gnupg/gpg-agent.conf pinentry
+  pinentry=$(brew_prefix)/bin/pinentry-mac
+  act mkdir -p "$HOME/.gnupg"
+  act chmod 700 "$HOME/.gnupg"
+  [ -f "$conf" ] || act touch "$conf"
+  set_conf_line "$conf" pinentry-program "pinentry-program $pinentry"
+  set_conf_line "$conf" default-cache-ttl "default-cache-ttl 3600"
+  set_conf_line "$conf" max-cache-ttl "max-cache-ttl 31536000"
+  set_conf_line "$conf" allow-preset-passphrase "allow-preset-passphrase"
+}
+
+# replace the line starting with <key>, or append it
+set_conf_line() {
+  local file=$1 key=$2 line=$3 tmp
+  if grep -Eq "^[[:space:]]*$key([[:space:]]|$)" "$file"; then
+    grep -Fxq "$line" "$file" && return 0
+    if [ "$DRY_RUN" = 1 ]; then
+      info "[dry-run] set '$line' in $(tilde_path "$file")"
+      return 0
+    fi
+    tmp=$(mktemp "$file.XXXXXX")
+    awk -v k="$key" -v l="$line" '$1 == k && !done { print l; done = 1; next } $1 == k { next } { print }' "$file" >"$tmp"
+    mv "$tmp" "$file"
+  else
+    if [ "$DRY_RUN" = 1 ]; then
+      info "[dry-run] append '$line' to $(tilde_path "$file")"
+    else
+      printf '%s\n' "$line" >>"$file"
+    fi
+  fi
+}
+
+# //
+# .configs: REPOSITORY CLASSIFICATION
+# //
+
+# prints one of: empty, branch-missing (only with a ref), mise-history,
+# unrelated, missing, unreachable
+classify_remote() {
+  local url=$1 ref=${2:-} refs slug tmp state
+  refs=$(GIT_TERMINAL_PROMPT=0 git ls-remote --heads -- "$url" 2>/dev/null) || {
+    slug=$(github_slug "$url")
+    if [ -n "$slug" ] && gh=$(gh_bin) && "$gh" auth status --hostname github.com >/dev/null 2>&1; then
+      if "$gh" api "repos/$slug" >/dev/null 2>&1; then
+        echo unreachable
+      else
+        echo missing
+      fi
+    elif [ -z "$slug" ] && [ "${url#file://}" != "$url" ] && ! [ -e "${url#file://}" ]; then
+      echo missing
+    elif [ -z "$slug" ] && [ "${url#/}" != "$url" ] && ! [ -e "$url" ]; then
+      echo missing
+    else
+      echo unreachable
+    fi
+    return 0
+  }
+  if [ -z "$refs" ]; then
+    echo empty
+    return 0
+  fi
+  if [ -n "$ref" ] && ! printf '%s\n' "$refs" | awk '{print $2}' | grep -Fxq "refs/heads/$ref"; then
+    echo branch-missing
+    return 0
+  fi
+  # mise publishes `main`; a bare repository made with `git init` points
+  # HEAD at master, so look at main whenever it exists
+  if [ -z "$ref" ] && printf '%s\n' "$refs" | awk '{print $2}' | grep -Fxq refs/heads/main; then
+    ref=main
+  fi
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-configs.XXXXXX")
+  if [ -n "$ref" ]; then
+    git clone --quiet --depth 1 --branch "$ref" --no-checkout -- "$url" "$tmp/repo" >/dev/null 2>&1 || {
+      rm -rf "$tmp"
+      echo unreachable
+      return 0
+    }
+  else
+    git clone --quiet --depth 1 --no-checkout -- "$url" "$tmp/repo" >/dev/null 2>&1 || {
+      rm -rf "$tmp"
+      echo unreachable
+      return 0
+    }
+  fi
+  if git -C "$tmp/repo" cat-file -e HEAD:.mise-history/format.toml 2>/dev/null; then
+    state=mise-history
+  else
+    state=unrelated
+  fi
+  rm -rf "$tmp"
+  echo "$state"
+}
+
+# the origin this machine's history is connected to (empty when none)
+local_origin() {
+  [ -f "$MISE_LOCAL_CONFIG" ] || return 0
+  toml_get "$MISE_LOCAL_CONFIG" history.origin.url
+}
+
+history_repo() {
+  local repo
+  repo=$(mise_cmd dot status --json 2>/dev/null | json_query 'd.get("history", {}).get("history_repo")') || true
+  [ -n "$repo" ] || repo=~/.local/state/mise/history/repo.git
+  expand_home "$repo"
+}
+
+# Review a setup repository's shared mise configuration before adopting it:
+# adoption runs `mise bootstrap` from it, so anything beyond tracking entries
+# and history settings must be approved explicitly.
+review_configs_manifest() {
+  local url=$1 ref=${2:-} tmp violations extra
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-review.XXXXXX")
+  set -- --quiet --depth 1
+  [ -z "$ref" ] || set -- "$@" --branch "$ref"
+  if ! git clone "$@" -- "$url" "$tmp/repo" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    die "could not fetch $(printf '%s' "$url" | redact) to review it; nothing was adopted"
+  fi
+  extra=$(cd "$tmp/repo" || exit; find config -type f -o -type l 2>/dev/null | grep -vx 'config/config.toml' || true)
+  if [ -L "$tmp/repo/config/config.toml" ]; then
+    extra="${extra:+$extra
+}config/config.toml (a symbolic link)"
+  fi
+  violations=$extra
+  if [ -z "$violations" ] && ! violations=$(manifest_policy "$tmp/repo/config/config.toml"); then :; fi
+  rm -rf "$tmp"
+  [ -n "$violations" ] || return 0
+  err "the .configs mise configuration declares more than tracking entries for registry apps:"
+  printf '%s\n' "$violations" | sed 's/^/      /' >&2
+  die "not adopted. mise would apply this on every machine; remove it from the repository's config/config.toml"
+}
+
+# after adoption, the manifest that mise restored must still pass policy (the
+# repository could have changed between the review and the fetch)
+check_adopted_manifest() {
+  local violations
+  violations=$(manifest_policy "$MISE_MANIFEST") && return 0
+  printf '%s\n' "$violations" | sed 's/^/      /' >&2
+  mise_cmd dot undo --yes >/dev/null 2>&1 || true
+  mise_cmd dot origin --remove >/dev/null 2>&1 || true
+  die "the adopted manifest declares more than tracking entries; adoption was undone and the origin disconnected"
+}
+
+# every machine exchanges through the gated dotfiles service, never mise's
+# automatic pull; the override file beats any other configuration
+pin_manual_sync() {
+  [ "$(mise_cmd settings get history.sync 2>/dev/null)" = manual ] && [ -f "$MISE_CONFIG_DIR_EFFECTIVE/config.override.toml" ] && return 0
+  act mise_cmd settings set --override history.sync manual
+}
+
+# //
+# .configs: ENROLLMENT
+# //
+
+# true when a path is a Mackup-managed link (into a Mackup storage folder)
+is_mackup_link() {
+  [ -L "$1" ] || return 1
+  case "$(readlink "$1")" in
+  */Mackup/* | */mackup/* | */.mackup/*) return 0 ;;
+  esac
+  return 1
+}
+
+# replace a Mackup link with a regular copy of what it points to
+unlink_mackup() {
+  local path=$1 target
+  target=$(readlink "$path")
+  if ! [ -e "$path" ]; then
+    warn "$(tilde_path "$path") is a broken Mackup link to $target; leaving it alone"
+    return 1
+  fi
+  confirm "$(tilde_path "$path") is a Mackup link. Replace it with a regular copy (the Mackup copy stays untouched)?" || return 1
+  local dest
+  ensure_backup_dir
+  dest=$_BACKUP_DIR/${path#"$HOME"/}.mackup-link
+  act mkdir -p "$(dirname "$dest")"
+  act cp -P "$path" "$dest"
+  if [ "$DRY_RUN" != 1 ]; then
+    local tmpdir tmp
+    tmpdir=$(mktemp -d "$(dirname "$path")/.dotfiles-mackup.XXXXXX") || return 1
+    tmp=$tmpdir/copy
+    if [ -d "$path" ]; then
+      cp -pR "$path/" "$tmp"
+    else
+      cp -p "$path" "$tmp"
+    fi || {
+      rm -rf "$tmpdir"
+      err "could not copy $(tilde_path "$path"); the Mackup link is unchanged"
+      return 1
+    }
+    if ! { rm -f "$path" && mv "$tmp" "$path" && rmdir "$tmpdir"; }; then
+      err "could not replace $(tilde_path "$path"); restore it with: mv $(tilde_path "$dest") $(tilde_path "$path")"
+      return 1
+    fi
+  fi
+  info "replaced the Mackup link $(tilde_path "$path") with a regular copy (link recorded in $(tilde_path "$dest"))"
+}
+
+ensure_manifest_tracked() {
+  local findings
+  manifest_tracks "$MISE_MANIFEST" && return 0
+  if [ -f "$MISE_MANIFEST" ] && ! findings=$(scan_files "$MISE_MANIFEST"); then
+    printf '%s\n' "$findings" | sed 's/^/      /' >&2
+    die "possible secrets in $(tilde_path "$MISE_MANIFEST"), which syncs to .configs; move them to $(tilde_path "$MISE_LOCAL_CONFIG") or an encrypted file"
+  fi
+  act mise_cmd dot track "$(tilde_path "$MISE_MANIFEST")"
+}
+
+cmd_config_add() {
+  local id='' unverified=0 strategy method path p tracked=0 paths
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --unverified) unverified=1 ;;
+    --yes | -y) ASSUME_YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -*) die "unknown option: $1" ;;
+    *) id=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$id" ] || die "usage: dotfiles config add <app> [--unverified]"
+  app_file "$id" >/dev/null
+  app_supported_here "$id" || die "$id is not supported on $(platform_os)"
+  strategy=$(app_get "$id" sync.strategy)
+  method=$(app_get "$id" sync.method)
+  case $strategy in
+  auto) ;;
+  manual) die "$id is manual-only: $(app_get "$id" unsafe.notes | head -3)" ;;
+  *) die "$id is excluded from sync: $(app_get "$id" unsafe.notes | head -3)" ;;
+  esac
+  if [ "$(app_get "$id" compat.verified)" != true ] && [ $unverified = 0 ]; then
+    die "$id has not been verified on a real install; re-run with --unverified to enroll it anyway"
+  fi
+  log "enrolling $(app_get "$id" app.name)"
+
+  # named pre-enroll actions
+  for p in $(app_list "$id" sync.actions); do app_action "$p"; done
+
+  paths=''
+  case $method in
+  defaults)
+    [ "$(platform_os)" = macos ] || die "$id uses macOS preferences"
+    if [ "${DOTFILES_TEST_DOMAINS_ONLY:-0}" = 1 ]; then
+      case "$(app_get "$id" sync.domain)" in
+      dev.dotfiles.test.*) ;;
+      *) die "refusing real preference domain $(app_get "$id" sync.domain) in a test run" ;;
+      esac
+    fi
+    path=$(prefs_file_for "$id")
+    if [ "$DRY_RUN" = 1 ]; then
+      info "[dry-run] export a sanitized copy of $(app_get "$id" sync.domain) to $(tilde_path "$path")"
+    else
+      prefs_policy_write --include "$id"
+      prefs_py export --policy "$PREFS_POLICY" --app "$id" >/dev/null
+    fi
+    paths=$path
+    ;;
+  file)
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      is_safe_home_path "$p" || die "registry path is not a safe home path: $p"
+      path=$(expand_home "$p")
+      if is_mackup_link "$path"; then
+        unlink_mackup "$path" || continue
+      elif [ -L "$path" ]; then
+        warn "$p is a symlink to $(readlink "$path"); tracking would save the link, not its contents. Skipped."
+        continue
+      fi
+      if ! [ -e "$path" ]; then
+        info "$p does not exist yet; it is tracked now and saved once the app creates it"
+      fi
+      paths="$paths
+$path"
+    done <<EOF
+$(app_list "$id" sync.paths)
+EOF
+    ;;
+  *) die "$id: unknown sync method '$method'" ;;
+  esac
+
+  # refuse before anything is checkpointed
+  # shellcheck disable=SC2086
+  local findings
+  findings=$(printf '%s\n' "$paths" | while IFS= read -r p; do [ -n "$p" ] && [ -e "$p" ] && scan_files "$p"; done || true)
+  if [ -n "$findings" ]; then
+    printf '%s\n' "$findings" | sed 's/^/      /' >&2
+    die "possible secrets found; nothing was tracked. Remove them, or track the file encrypted (see README: Encryption)"
+  fi
+
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if manifest_tracks "$p"; then
+      dim "    already tracked $(tilde_path "$p")"
+      continue
+    fi
+    act mise_cmd dot track "$(tilde_path "$p")"
+    tracked=1
+  done <<EOF
+$paths
+EOF
+  ensure_manifest_tracked
+  [ "$method" != defaults ] || [ "$DRY_RUN" = 1 ] || prefs_policy_write
+  [ $tracked = 0 ] || info "tracked; the watcher saves and syncs further changes automatically"
+}
+
+cmd_config_remove() {
+  local id=${1:-} p
+  [ -n "$id" ] || die "usage: dotfiles config remove <app>"
+  app_file "$id" >/dev/null
+  app_enrolled "$id" || die "$id is not enrolled"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    manifest_tracks "$p" || continue
+    act mise_cmd dot untrack "$(tilde_path "$p")"
+  done <<EOF
+$(app_tracked_paths "$id")
+EOF
+  if [ "$(app_get "$id" sync.method)" = defaults ] && [ "$DRY_RUN" != 1 ]; then
+    prefs_policy_write
+    rm -f "$PREFS_STATE_DIR/$(app_get "$id" sync.domain).base.plist" "$PREFS_STATE_DIR/$(app_get "$id" sync.domain).pending"
+  fi
+  info "$id is no longer tracked. Its settings on this Mac are unchanged."
+  info "Earlier versions stay in your .configs history; to erase them see README: Removing data from history."
+}
+
+cmd_config_list() {
+  local id os enrolled installed verified
+  os=$(platform_os)
+  printf '%-14s %-24s %-9s %-9s %-8s %-9s %s\n' APP NAME STRATEGY METHOD DEFAULT STATE NOTES
+  for id in $(app_ids); do
+    app_list "$id" app.platforms | grep -qx "$os" || continue
+    enrolled=-
+    installed=''
+    if app_enrolled "$id"; then enrolled=enrolled; fi
+    verified=$(app_get "$id" compat.verified)
+    [ "$verified" = true ] || installed='unverified'
+    printf '%-14s %-24s %-9s %-9s %-8s %-9s %s\n' "$id" "$(app_get "$id" app.name)" \
+      "$(app_get "$id" sync.strategy)" "$(app_get "$id" sync.method)" \
+      "$(app_get "$id" sync.default)" "$enrolled" "$installed"
+  done
+}
+
+cmd_config_status() {
+  local conflicts=$PREFS_STATE_DIR/conflicts.jsonl pending f
+  mise_cmd dot status || true
+  if [ -f "$GUARD_MARKER" ]; then
+    log "secret guard"
+    err "publishing is paused: what would be published looks like it holds a secret"
+    sed 's/^/      /' "$GUARD_MARKER" >&2
+    info "remove it from the file, then run: dotfiles config sync (it explains any further step)"
+  fi
+  if [ -f "$INBOUND_MARKER" ]; then
+    log "incoming changes"
+    err "incoming .configs changes were refused; their mise configuration declares:"
+    sed 's/^/      /' "$INBOUND_MARKER" >&2
+  fi
+  if [ -f "$EXCHANGE_MARKER" ]; then
+    log "background exchange"
+    err "the last automatic exchange with .configs failed: $(cat "$EXCHANGE_MARKER")"
+    info "full output: $(tilde_path "$EXCHANGE_LOG"); retry now with: dotfiles config sync"
+  fi
+  if [ "$(platform_os)" = macos ]; then
+    log "macOS preferences"
+    pending=0
+    for f in "$PREFS_STATE_DIR"/*.pending; do
+      [ -e "$f" ] || continue
+      pending=1
+      info "pending: $(basename "$f" .pending) changed on another Mac; applies when the app is not running"
+    done
+    [ $pending = 1 ] || info "no pending incoming preference changes"
+    if [ -s "$conflicts" ]; then
+      warn "keys changed on two Macs where this Mac's value was kept (the other value is in history):"
+      tail -n 10 "$conflicts" | json_lines_summary >&2
+      info "inspect with: mise dot history --path ~/.config/dotfiles/prefs/<domain>.plist"
+      info "clear this list with: dotfiles config status --clear-conflicts"
+    fi
+  fi
+}
+
+json_lines_summary() {
+  "$(python3_bin)" -I -c 'import json,sys,time
+for line in sys.stdin:
+    try:
+        e=json.loads(line)
+    except ValueError:
+        continue
+    print("      %s %s: %s" % (time.strftime("%Y-%m-%d %H:%M", time.localtime(e["time"])), e["app"], ", ".join(e["keys"])))'
+}
+
+cmd_config_sync() {
+  local violations
+  if [ -z "$(local_origin)" ]; then
+    warn "no .configs origin is connected; run: dotfiles config init <owner/repo>"
+    return 1
+  fi
+  log "saving tracked files"
+  [ "$(platform_os)" != macos ] || [ ! -f "$PREFS_POLICY" ] || prefs_py tick --policy "$PREFS_POLICY" || true
+  mise_cmd dot save --best-effort || true
+  log "checking what would be published"
+  publish_gate || return 1
+  log "exchanging history with $(local_origin | redact)"
+  mise_cmd dot sync || return 1
+  if ! violations=$(incoming_policy); then
+    printf '%s\n' "$violations" >"$INBOUND_MARKER"
+    err "incoming .configs changes were NOT applied: their mise configuration declares more than tracking entries:"
+    printf '%s\n' "$violations" | sed 's/^/      /' >&2
+    info "someone (or something) pushed this to your .configs. Inspect it with: git -C <clone of .configs> log -p config/config.toml"
+    info "fix the repository; the next exchange checks again"
+    notify_user "Settings sync stopped" "Incoming .configs changes were refused. Run: dotfiles config status"
+    return 1
+  fi
+  rm -f "$INBOUND_MARKER"
+  log "applying incoming changes"
+  mise_cmd dot pull
+  info "secret guard: clear; publishing is active"
+  rm -f "$EXCHANGE_MARKER"
+}
+
+cmd_config_resolve() {
+  local mode='' path=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --take-remote | --keep-local | --diff) mode=$1 ;;
+    -*) die "usage: dotfiles config resolve <path> --diff|--take-remote|--keep-local" ;;
+    *) path=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$path" ] || {
+    mise_cmd dot status
+    return 0
+  }
+  case $mode in
+  --diff | '') mise_cmd dot conflicts "$path" ;;
+  --take-remote) mise_cmd dot pull --take-remote "$path" ;;
+  --keep-local)
+    # before the first adoption completes nothing is tracked here, and
+    # tracking the file by hand would start a history unrelated to .configs
+    if [ -z "$(tracked_paths)" ]; then
+      die "$path is not tracked on this machine yet (the adoption is paused), so there is no local version to keep. Keep yours this way: cp $path $path.mine; dotfiles config resolve $path --take-remote; cp $path.mine $path (it then syncs to your other machines)"
+    fi
+    mise_cmd dot save "$path" || true
+    mise_cmd dot pull --keep-local "$path"
+    ;;
+  esac
+}
+
+# post-restore work for every enrolled app on this machine
+cmd_config_apply_actions() {
+  local id a
+  for id in $(app_ids); do
+    app_supported_here "$id" || continue
+    app_enrolled "$id" || continue
+    for a in $(app_list "$id" sync.actions); do app_action "$a"; done
+  done
+  if [ "$(platform_os)" = macos ]; then
+    prefs_policy_write
+    [ "$DRY_RUN" = 1 ] || prefs_py tick --policy "$PREFS_POLICY" >/dev/null || warn "some preference domains could not be applied yet (dotfiles config status)"
+  fi
+}
+
+# parts to skip in mise bootstrap: --skip-packages, DOTFILES_SKIP_SERVICES,
+# and DOTFILES_BOOTSTRAP_SKIP (extra comma-separated parts, used by tests)
+# LaunchAgents load into the desktop login session, which an SSH session on a
+# Mac nobody has logged in to yet does not have
+no_gui_session() {
+  [ "$(platform_os)" = macos ] || return 1
+  ! launchctl print "gui/$(id -u)" >/dev/null 2>&1
+}
+
+bootstrap_skip_list() {
+  local list=''
+  [ "${1:-0}" = 0 ] || list="$list,packages,tools"
+  if [ "${DOTFILES_SKIP_SERVICES:-0}" != 0 ] || no_gui_session; then
+    list="$list,services"
+  fi
+  [ -z "${DOTFILES_BOOTSTRAP_SKIP:-}" ] || list="$list,$DOTFILES_BOOTSTRAP_SKIP"
+  printf '%s\n' "${list#,}"
+}
+
+services_apply() {
+  if [ "${DOTFILES_SKIP_SERVICES:-0}" = 1 ]; then
+    info "skipping background services (DOTFILES_SKIP_SERVICES=1)"
+    return 0
+  fi
+  if no_gui_session; then
+    warn "no macOS desktop session here (SSH before anyone logged in?): skipping the background services; log in on the Mac, then run: dotfiles install"
+    return 0
+  fi
+  act mise_cmd bootstrap services apply --yes
+}
+
+# Publish this machine's tracked settings as a new .configs history.
+cmd_config_init() {
+  local spec='' ref='' url state apps='' id slug history findings remote_url
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --ref) ref=${2:?--ref needs a branch}; shift ;;
+    --apps) apps=${2:?--apps needs a comma-separated list}; shift ;;
+    --yes | -y) ASSUME_YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -*) die "unknown option: $1" ;;
+    *) spec=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$spec" ] || die "usage: dotfiles config init <owner/repo> [--apps a,b] [--ref branch]"
+  url=$(configs_url "$spec") || die "invalid repository: $spec"
+  [ -z "$ref" ] || printf '%s\n' "$ref" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || die "invalid branch: $ref"
+
+  remote_url=$(local_origin)
+  if [ -n "$remote_url" ] && [ "$remote_url" != "$url" ]; then
+    die "this machine's history is already connected to $(printf '%s' "$remote_url" | redact); disconnect with 'mise dot origin --remove' first"
+  fi
+
+  state=$(classify_remote "$url" "$ref")
+  case $state in
+  empty) ;;
+  branch-missing) info "the history goes to a new branch '$ref'; other branches stay untouched" ;;
+  missing)
+    slug=$(github_slug "$url")
+    [ -n "$slug" ] || die "repository not found: $url"
+    confirm "Create the PRIVATE GitHub repository $slug for your settings?" || die "create the private repository $slug yourself, then re-run"
+    act "$(gh_bin)" repo create "$slug" --private --description "Personal application settings (mise dotfiles history)" >/dev/null
+    ;;
+  mise-history)
+    if [ "$remote_url" = "$url" ]; then
+      info "already connected to $(printf '%s' "$url" | redact)"
+      return 0
+    fi
+    die "$(printf '%s' "$url" | redact) already holds a .configs history; on this machine run: dotfiles config adopt $spec"
+    ;;
+  unrelated)
+    err "$(printf '%s' "$url" | redact) has commits that are not a mise history; nothing was changed."
+    info "Either create a new empty private repository (recommended), or keep the existing"
+    info "content and publish the history to a new branch of it:"
+    info "  dotfiles config init $spec --ref mise-history"
+    exit 1
+    ;;
+  *) die "cannot reach $(printf '%s' "$url" | redact); check the name and your GitHub sign-in (gh auth status)" ;;
+  esac
+
+  # what to enroll
+  if [ -z "$apps" ]; then
+    for id in $(app_ids); do
+      app_supported_here "$id" || continue
+      [ "$(app_get "$id" sync.default)" = true ] || continue
+      apps="$apps,$id"
+    done
+    apps=${apps#,}
+  fi
+  apps=$(printf '%s' "$apps" | tr ',' ' ')
+  for id in $apps; do app_file "$id" >/dev/null; done
+  log "proposed tracking manifest"
+  for id in $apps; do
+    app_tracked_paths "$id" | while IFS= read -r p; do info "$id: $(tilde_path "$p")"; done
+  done
+  info "plus your tracking manifest: $(tilde_path "$MISE_MANIFEST")"
+  mackup_report
+  confirm "Save these into a new history and publish it to $(printf '%s' "$url" | redact)?" || die "cancelled; nothing was published"
+
+  for id in $apps; do
+    cmd_config_add "$id"
+  done
+  ensure_manifest_tracked
+
+  [ "$DRY_RUN" = 1 ] && {
+    info "[dry-run] scan history, then: mise dot origin set $url --sync manual${ref:+ --branch $ref}"
+    return 0
+  }
+
+  log "scanning the whole local history before its first publication"
+  history=$(history_repo)
+  local rc=0
+  findings=$(scan_history "$history") || rc=$?
+  case $rc in
+  0) ;;
+  1)
+    printf '%s\n' "$findings" | sed 's/^/      /' >&2
+    die "possible secrets in saved history; nothing was published. See README: Removing data from history"
+    ;;
+  *) die "could not read the saved history at $(tilde_path "$history"); nothing was published" ;;
+  esac
+  touch "$GUARD_STAMP" 2>/dev/null || true
+
+  if violations=$(manifest_policy "$MISE_MANIFEST"); then :; else
+    printf '%s\n' "$violations" | sed 's/^/      /' >&2
+    die "$(tilde_path "$MISE_MANIFEST") declares settings that .configs must not carry; move them to $(tilde_path "$MISE_LOCAL_CONFIG") and re-run"
+  fi
+  pin_manual_sync
+  log "connecting $(printf '%s' "$url" | redact)"
+  if [ "$state" = branch-missing ]; then
+    # mise's recipe for a repository with other content: publish the local
+    # history to a new branch first (a plain push: it never overwrites)
+    git --git-dir="$history" push --quiet -- "$url" "refs/heads/main:refs/heads/$ref" ||
+      die "could not create the branch $ref on $(printf '%s' "$url" | redact)"
+  fi
+  if [ -n "$ref" ]; then
+    mise_cmd dot origin set "$url" --sync manual --branch "$ref" --yes
+  else
+    mise_cmd dot origin set "$url" --sync manual --yes
+  fi
+  services_apply
+  mise_cmd dot sync
+  verify_remote "$url" "$ref"
+}
+
+# Restore and keep in sync an existing .configs history on this machine.
+cmd_config_adopt() {
+  local spec='' ref='' url state take=0 replace=0 remote_url
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --ref) ref=${2:?--ref needs a branch}; shift ;;
+    --take-remote) take=1 ;;
+    --replace-history) replace=1 ;;
+    --yes | -y) ASSUME_YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -*) die "unknown option: $1" ;;
+    *) spec=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$spec" ] || die "usage: dotfiles config adopt <owner/repo> [--take-remote] [--ref branch]"
+  url=$(configs_url "$spec") || die "invalid repository: $spec"
+  [ -z "$ref" ] || printf '%s\n' "$ref" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || die "invalid branch: $ref"
+
+  remote_url=$(local_origin)
+  if [ "$remote_url" = "$url" ] && [ $replace = 1 ]; then
+    # discard this machine's unpublished checkpoints (e.g. one the secret
+    # guard stopped); files on disk stay, and differing ones need a decision
+    confirm "Discard this machine's unpublished checkpoints and take the history of $(printf '%s' "$url" | redact)?" ||
+      die "cancelled"
+    review_configs_manifest "$url" "$ref"
+    pin_manual_sync
+    # mise replaces history only with every differing file taken from the
+    # origin; it saves the versions it replaces first, and `undo` puts them
+    # back, so the files on disk end up unchanged
+    set -- --only dotfiles --replace-history --take-remote-all --yes
+    (cd "$HOME" && mise_cmd bootstrap --adopt "$url${ref:+?ref=$ref}" "$@") ||
+      die "could not replace the local history; nothing changed"
+    if [ $take = 0 ]; then
+      mise_cmd dot undo --yes >/dev/null || warn "could not restore this machine's file versions; see: mise dot history"
+    fi
+    check_adopted_manifest
+    info "replaced this machine's unpublished checkpoints with the history of $(printf '%s' "$url" | redact)"
+    return 0
+  fi
+  if [ "$remote_url" = "$url" ]; then
+    info "already connected to $(printf '%s' "$url" | redact)"
+    cmd_config_apply_actions
+    services_apply
+    return 0
+  fi
+  [ -z "$remote_url" ] || die "this machine's history is connected to $(printf '%s' "$remote_url" | redact); refusing to switch"
+
+  state=$(classify_remote "$url" "$ref")
+  [ "$state" = mise-history ] || die "$(printf '%s' "$url" | redact) is $state, not a .configs history (first machine? run: dotfiles config init $spec)"
+  review_configs_manifest "$url" "$ref"
+  pin_manual_sync
+
+  # restore tracked files only: the blueprint step already installed
+  # packages, tools, and repositories, and .configs may declare nothing else
+  set -- --only dotfiles
+  [ "$ASSUME_YES" = 0 ] || set -- "$@" --yes
+  [ $take = 0 ] || set -- "$@" --take-remote-all
+  [ "$DRY_RUN" = 0 ] || set -- "$@" --dry-run
+
+  log "adopting $(printf '%s' "$url" | redact)"
+  local target=$url
+  [ -z "$ref" ] || target="$url?ref=$ref"
+  if ! (cd "$HOME" && mise_cmd bootstrap --adopt "$target" "$@"); then
+    warn "adoption paused: files on this machine differ from your .configs; nothing was changed"
+    info "review:     dotfiles config status   (and: dotfiles config resolve <path> --diff)"
+    info "take one:   dotfiles config resolve <path> --take-remote"
+    info "take all:   dotfiles config adopt $spec --take-remote   (backed up; 'mise dot undo' reverts)"
+    info "keep yours: cp <path> <path>.mine; dotfiles config resolve <path> --take-remote;"
+    info "            cp <path>.mine <path>   (yours then syncs to your other machines)"
+    return 1
+  fi
+  [ "$DRY_RUN" = 1 ] && return 0
+  check_adopted_manifest
+  cmd_config_apply_actions
+  services_apply
+  verify_origin "$url"
+}
+
+verify_origin() {
+  local got
+  got=$(local_origin)
+  [ "$got" = "$1" ] || die "expected origin $(printf '%s' "$1" | redact), found $(printf '%s' "${got:-none}" | redact)"
+  info "origin verified: $(printf '%s' "$got" | redact)"
+}
+
+# the published history is a mise setup repository with only personal paths
+verify_remote() {
+  local url=$1 ref=${2:-} tmp bad
+  verify_origin "$url"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-verify.XXXXXX")
+  # read back the branch mise publishes, not whatever the remote HEAD names
+  # (a bare repository made with `git init` points HEAD at master)
+  if ! git clone --quiet --depth 1 --branch "${ref:-main}" -- "$url" "$tmp/repo" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    die "could not read back $(printf '%s' "$url" | redact)"
+  fi
+  [ -f "$tmp/repo/.mise-history/format.toml" ] || {
+    rm -rf "$tmp"
+    die "the origin has no mise history format marker"
+  }
+  [ -f "$tmp/repo/config/config.toml" ] || warn "the origin lacks your tracking manifest (config/config.toml)"
+  bad=$(cd "$tmp/repo" || exit; find . -path ./.git -prune -o -type f -print | grep -E '^\./(config/conf\.d/0[01]-dotfiles|home/\.dotfiles/|home/\.(zshrc|zshenv|common\.zshrc|tmux\.conf)$)' || true)
+  rm -rf "$tmp"
+  [ -z "$bad" ] || die "public .dotfiles files reached .configs: $bad"
+  info "remote history verified"
+}
+
+# report Mackup links and storage so nothing is lost during migration
+mackup_report() {
+  local f found=0
+  for f in "$HOME"/.[!.]* "$HOME/Library/Preferences"/* "$XDG_CONFIG_HOME"/*; do
+    [ -L "$f" ] || continue
+    is_mackup_link "$f" || continue
+    if [ $found = 0 ]; then
+      log "Mackup links (left unchanged unless an enrolled app uses them)"
+      found=1
+    fi
+    if [ -e "$f" ]; then
+      info "$(tilde_path "$f") -> $(readlink "$f")"
+    else
+      warn "broken Mackup link: $(tilde_path "$f") -> $(readlink "$f")"
+    fi
+  done
+  return 0
+}
+
+# //
+# DOCTOR
+# //
+
+cmd_config_doctor() {
+  local problems=0 v origin
+  if [ -f "$GUARD_MARKER" ]; then
+    err "publishing is paused by the secret guard (see: dotfiles config status)"
+    problems=1
+  fi
+  if [ -f "$INBOUND_MARKER" ]; then
+    err "incoming .configs changes were refused by the manifest policy (see: dotfiles config status)"
+    problems=1
+  fi
+  if [ -f "$EXCHANGE_MARKER" ]; then
+    err "the last automatic exchange with .configs failed: $(cat "$EXCHANGE_MARKER") (see: dotfiles config status)"
+    problems=1
+  fi
+  if [ -n "$(local_origin)" ] && [ "$(mise_cmd settings get history.sync 2>/dev/null)" != manual ]; then
+    err "mise's own automatic pull is on, which bypasses the manifest policy (run: mise settings set --override history.sync manual)"
+    problems=1
+  fi
+  log "mise"
+  v=$(mise_cmd --version 2>/dev/null | awk '{print $1}')
+  if [ -z "$v" ]; then
+    err "mise is not installed"
+    problems=1
+  elif ! version_ge "$v" "$MIN_MISE_VERSION"; then
+    err "mise $v is older than $MIN_MISE_VERSION (run: mise self-update)"
+    problems=1
+  else
+    info "mise $v at $(command -v mise 2>/dev/null || echo "$MISE_BIN")"
+  fi
+
+  log "configuration layers"
+  if [ "$(real_path "$SHARED_LAYER_LINK" 2>/dev/null)" = "$(real_path "$DOTFILES_DIR/mise/global.toml")" ]; then
+    info "shared layer: $(tilde_path "$SHARED_LAYER_LINK") -> .dotfiles"
+  else
+    err "shared layer missing or not linked to this checkout: $(tilde_path "$SHARED_LAYER_LINK") (run: dotfiles link)"
+    problems=1
+  fi
+  if manifest_tracks "$MISE_MANIFEST"; then
+    info "tracking manifest: $(tilde_path "$MISE_MANIFEST") (tracked)"
+  elif [ -n "$(local_origin)" ]; then
+    warn "tracking manifest $(tilde_path "$MISE_MANIFEST") is not tracked; new machines could not restore your enrollment"
+  fi
+
+  log "origin and authentication"
+  origin=$(local_origin)
+  if [ -z "$origin" ]; then
+    warn "no .configs origin connected"
+  else
+    info "origin: $(printf '%s' "$origin" | redact)"
+    # what the LaunchAgent sees: a minimal environment, no shell activation
+    if env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_TERMINAL_PROMPT=0 \
+      git ls-remote --heads -- "$origin" >/dev/null 2>&1; then
+      info "background authentication: ok (git ls-remote in a minimal environment)"
+    else
+      err "the background watcher cannot authenticate to the origin (try: gh auth login, then dotfiles install)"
+      problems=1
+    fi
+  fi
+  if [ -f "$HOME/.gitconfig" ] && grep -Eq 'helper *= *!?/(opt/homebrew|usr/local)/bin/gh' "$HOME/.gitconfig"; then
+    warn "~/.gitconfig names a machine-specific gh path (from 'gh auth setup-git'); remove it: it syncs to other machines"
+  fi
+  if [ "$(git_global_get_all include.path | grep -c 'configs/git/config.conf' || true)" -gt 1 ]; then
+    warn "the .dotfiles Git aliases are included twice (harmless); run: dotfiles config add git"
+  fi
+
+  log "services"
+  local services stopped
+  services=$(mise_cmd bootstrap services status 2>&1 || true)
+  printf '%s\n' "$services" | sed 's/^/    /' >&2
+  # with an origin, stopped services mean settings silently stop syncing
+  stopped=$(printf '%s\n' "$services" | awk '$2 ~ /^user-service:/ && $1 != "unchanged" { sub(/^user-service:/, "", $2); print $2 }' | paste -sd ' ' -)
+  if [ -n "$origin" ] && [ -n "$stopped" ] && [ "${DOTFILES_SKIP_SERVICES:-0}" != 1 ]; then
+    # expected where services cannot run: say so, without failing the setup
+    if printf '%s\n' "$services" | grep -q 'systemctl. not found'; then
+      warn "background sync cannot run here ($stopped): no systemd user session; settings sync only when you run: dotfiles config sync"
+    elif no_gui_session; then
+      warn "background sync is not running ($stopped): there is no macOS desktop session; log in on the Mac, then run: dotfiles install"
+    else
+      err "background sync is not running ($stopped): run: dotfiles install (or: mise bootstrap services apply)"
+      problems=1
+    fi
+  fi
+
+  log "mise doctor (history section)"
+  mise_cmd doctor 2>&1 | awk '/^history|^dotfiles|history watcher|sync/ { print "    " $0 }' >&2 || true
+
+  if [ $problems = 0 ]; then
+    log "no blocking problems found"
+  else
+    err "problems found"
+    return 1
+  fi
+}
+
+version_ge() { # version_ge <have> <want>, dotted numeric
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
+}
+
+cmd_config() {
+  local sub=${1:-help}
+  shift || true
+  case $sub in
+  list) cmd_config_list "$@" ;;
+  add) cmd_config_add "$@" ;;
+  remove) cmd_config_remove "$@" ;;
+  status)
+    if [ "${1:-}" = --clear-conflicts ]; then
+      rm -f "$PREFS_STATE_DIR/conflicts.jsonl"
+      info "cleared the preference conflict list"
+    else
+      cmd_config_status "$@"
+    fi
+    ;;
+  sync) cmd_config_sync "$@" ;;
+  doctor) cmd_config_doctor "$@" ;;
+  init) cmd_config_init "$@" ;;
+  adopt) cmd_config_adopt "$@" ;;
+  resolve) cmd_config_resolve "$@" ;;
+  policy)
+    if manifest_policy "${1:-$MISE_MANIFEST}"; then info "the manifest passes the .configs policy"; else exit 1; fi
+    ;;
+  apply-actions) cmd_config_apply_actions "$@" ;;
+  help | -h | --help) usage_config ;;
+  *) die "unknown command: dotfiles config $sub (see: dotfiles config help)" ;;
+  esac
+}
+
+# //
+# INSTALL
+# //
+
+cmd_install() {
+  local spec='' ref='' init=0 skip_packages=0 take=0 apps='' url state origin_url skip
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --config) spec=${2:?--config needs <owner/repo>}; shift ;;
+    --config=*) spec=${1#--config=} ;;
+    --config-ref) ref=${2:?--config-ref needs a branch}; shift ;;
+    --init) init=1 ;;
+    --apps) apps=${2:?--apps needs a list}; shift ;;
+    --skip-packages) skip_packages=1 ;;
+    --take-remote) take=1 ;;
+    --yes | -y) ASSUME_YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) die "unknown option: $1 (see: install.sh --help)" ;;
+    esac
+    shift
+  done
+  if [ -n "$spec" ]; then
+    url=$(configs_url "$spec") || die "invalid --config '$spec': use OWNER/REPO, e.g. octocat/.configs"
+  fi
+  export ASSUME_YES DRY_RUN
+  DOTFILES_WARN_LOG=$(mktemp "${TMPDIR:-/tmp}/dotfiles-warnings.XXXXXX")
+  export DOTFILES_WARN_LOG
+
+  platform_os >/dev/null || die "unsupported operating system: $(uname -s)"
+  platform_arch >/dev/null || die "unsupported CPU architecture: $(uname -m)"
+
+  # running the installer is consent to apply this checkout's blueprint
+  act mise_cmd trust --quiet "$DOTFILES_DIR/mise.toml"
+
+  # 1. fundamental dotfiles: clear conflicts first, so bootstrap can link
+  cmd_link --check || die "resolve the dotfiles above, then re-run"
+
+  # 2. the public blueprint
+  log "applying the .dotfiles blueprint (mise bootstrap)"
+  origin_url=$(git -C "$DOTFILES_DIR" remote get-url origin 2>/dev/null || true)
+  # Running the installer is consent to apply the blueprint, and step 1 has
+  # already asked before replacing anything of yours, so mise is not asked
+  # to confirm each part again. Without a terminal its questions would also
+  # read end-of-file and silently skip every part while still succeeding.
+  set -- --yes
+  skip=$(bootstrap_skip_list "$skip_packages")
+  [ -z "$skip" ] || set -- "$@" --skip "$skip"
+  if no_gui_session; then
+    warn "no macOS desktop session here (SSH before anyone logged in?): skipping the background services; log in on the Mac, then run: dotfiles install"
+  fi
+  [ "$DRY_RUN" = 0 ] || set -- "$@" --dry-run
+  # the tools step (npm:, pipx:) runs the Homebrew packages installed by the
+  # packages step in the same run, before any shell has put them on PATH
+  PATH="$(brew_prefix)/bin:$(brew_prefix)/sbin:$PATH"
+  export PATH
+  # mise skips brew: formulae on Intel; install them first, since the tools
+  # step (npm:, pipx:) needs some of them
+  if [ "$skip_packages" = 0 ] && [ "$(platform_os)" = macos ] && [ "${DOTFILES_OFFLINE:-0}" != 1 ]; then
+    brew_intel_fallback
+    brew_tap_formulae
+  fi
+  case $origin_url in
+  https://* | git@* | ssh://* | file://*)
+    (cd "$HOME" && mise_cmd bootstrap --from "$origin_url" --from-dir "$DOTFILES_DIR" "$@")
+    ;;
+  *) mise_cmd -C "$DOTFILES_DIR" bootstrap "$@" ;;
+  esac
+
+  # 3. personal settings
+  if [ -n "$spec" ]; then
+    if [ -n "$(github_slug "$url")" ]; then
+      github_auth
+    fi
+    state=$(classify_remote "$url" "$ref")
+    log ".configs: $(printf '%s' "$url" | redact) is $state"
+    set --
+    [ -z "$ref" ] || set -- "$@" --ref "$ref"
+    case $state in
+    mise-history)
+      [ $take = 0 ] || set -- "$@" --take-remote
+      cmd_config_adopt "$spec" "$@"
+      ;;
+    empty | missing | branch-missing)
+      [ $init = 1 ] || die "$(printf '%s' "$url" | redact) is $state. To publish this machine's settings as your first .configs history, re-run with --init"
+      [ -z "$apps" ] || set -- "$@" --apps "$apps"
+      cmd_config_init "$spec" "$@"
+      ;;
+    unrelated) cmd_config_init "$spec" "$@" ;;
+    *) die "cannot reach $(printf '%s' "$url" | redact); check the repository name and 'gh auth status'" ;;
+    esac
+  fi
+
+  [ "$DRY_RUN" = 1 ] && { rm -f "$DOTFILES_WARN_LOG"; return 0; }
+  # 4. verification
+  local healthy=1 earlier=$DOTFILES_WARN_LOG
+  DOTFILES_WARN_LOG=''
+  cmd_config_doctor || healthy=0
+  [ "$skip_packages" = 1 ] || clean_downloads
+  report_manual_steps
+  report_earlier_warnings "$earlier"
+  [ $healthy = 1 ] || die "setup finished with the problems above; fix them, then re-run (it is safe to repeat)"
+}
+
+# repeat the warnings from earlier in the run, which the package output buries
+report_earlier_warnings() {
+  local file=$1 line
+  if [ -s "$file" ]; then
+    log "warnings earlier in this run"
+    awk '!seen[$0]++' "$file" | while IFS= read -r line; do info "- $line"; done
+  fi
+  rm -f "$file"
+}
+
+github_auth() {
+  local gh
+  gh=$(gh_bin) || die "the GitHub CLI is missing; install it with: mise bootstrap packages apply"
+  if ! "$gh" auth status --hostname github.com >/dev/null 2>&1; then
+    log "signing in to GitHub (a browser window opens)"
+    [ "$DRY_RUN" = 1 ] || "$gh" auth login --hostname github.com --git-protocol https --web ||
+      die "GitHub sign-in failed"
+  fi
+  git_github_credentials
+}
+
+report_manual_steps() {
+  log "remaining manual steps"
+  info "- Open a new terminal (or run: exec zsh) to load the shell configuration."
+  info "- In tmux, press prefix + I once to install tmux plugins."
+  if [ "$(platform_os)" = macos ]; then
+    info "- Install the fonts Hack and Input Mono (not redistributable here)."
+    info "- Sign in to apps that need accounts (1Password, Slack, Notion, Spark, Telegram, Discord)."
+    info "- Grant Bartender Accessibility and Screen Recording, and Little Snitch its network"
+    info "  extension, when macOS asks; activate Bartender's license once per Mac."
+    info "- Allow notifications for mise when asked, so sync conflicts can alert you."
+  fi
+}
+
+# Delete the installers and build caches the package step left behind: mise
+# keeps every downloaded app, bottle, and archive for weeks (cache_prune_age),
+# and Homebrew keeps its downloads and the Go caches from building tap formulae
+# (about 11 GB on a new Mac). What is installed never refers back to them.
+# Version lists and Homebrew's metadata stay, so a re-run stays fast.
+clean_downloads() {
+  local cache brew_cache='' d kb=0 size
+  local dirs=()
+  cache=$(mise_cmd cache path 2>/dev/null) || cache=''
+  [ -z "$cache" ] || dirs+=("$cache/downloads-cas" "$cache/system-brew/casks" "$cache/system-brew/bottles")
+  if [ -x "$(brew_prefix)/bin/brew" ]; then
+    brew_cache=$(env HOMEBREW_NO_AUTO_UPDATE=1 "$(brew_prefix)/bin/brew" --cache 2>/dev/null) || brew_cache=''
+    [ -z "$brew_cache" ] || dirs+=("$brew_cache/downloads" "$brew_cache/go_cache" "$brew_cache/go_mod_cache")
+  fi
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    [ -d "$d" ] || continue
+    size=$(du -sk "$d/" 2>/dev/null | awk '{print $1}')
+    chmod -R u+w "$d" 2>/dev/null || true # Go makes its module cache read-only
+    if rm -rf "$d"; then
+      kb=$((kb + ${size:-0}))
+    else
+      warn "could not delete the downloads in $(tilde_path "$d")"
+    fi
+  done
+  # Homebrew names each download with a link into downloads/; drop the dangling ones
+  [ -z "$brew_cache" ] || find "$brew_cache" -maxdepth 1 -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+  [ "$kb" -lt 102400 ] || log "deleted $((kb / 1024)) MB of downloaded installers and build caches"
+}
+
+usage() {
+  cat <<'EOF'
+dotfiles — workstation setup from alvis/.dotfiles, personal settings through your .configs
+
+usage:
+  dotfiles install [--config OWNER/REPO] [--init] [--apps a,b] [--skip-packages]
+                   [--take-remote] [--config-ref BRANCH] [--dry-run] [--yes]
+  dotfiles link [--dry-run] [--yes]          link the fundamental dotfiles safely
+  dotfiles config help                       manage personal application settings
+  dotfiles prefs tick|keys <app>             (macOS) reconcile preference domains now
+  dotfiles guard                             check tracked files for secrets now
+  dotfiles watch                             the dotfiles-watch service loop
+EOF
+}
+
+usage_config() {
+  cat <<'EOF'
+dotfiles config — personal application settings in your private .configs history
+
+  list                       supported applications and their sync policies
+  add <app> [--unverified]   enroll an application's settings (secret-scanned first)
+  remove <app>               stop tracking it; its settings stay as they are
+  status [--clear-conflicts] tracked files, watcher health, pending changes, conflicts
+  sync                       save, push, fetch, and apply now
+  doctor                     diagnose configuration, authentication, and services
+  init <owner/repo>          first machine: publish a new history (--apps, --ref)
+  adopt <owner/repo>         another machine: restore and keep in sync (--take-remote)
+  resolve <path> --diff|--take-remote|--keep-local   settle a sync conflict
+  policy [file]              check a mise manifest against the .configs policy
+EOF
+}
+
+main() {
+  local cmd=${1:-help}
+  shift || true
+  case $cmd in
+  install) cmd_install "$@" ;;
+  link) cmd_link "$@" ;;
+  config) cmd_config "$@" ;;
+  prefs) cmd_prefs "$@" ;;
+  watch) cmd_watch ;;
+  guard) guard_check ;;
+  bootstrap-steps) cmd_bootstrap_steps "$@" ;;
+  scan)
+    [ $# -gt 0 ] || die "usage: dotfiles scan <path>... | --history"
+    if [ "$1" = --history ]; then scan_history "$(history_repo)"; else scan_files "$@"; fi
+    ;;
+  help | -h | --help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+  esac
+}
+
+main "$@"

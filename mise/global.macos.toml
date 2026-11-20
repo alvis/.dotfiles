@@ -1,0 +1,7 @@
+# Shared global mise layer from alvis/.dotfiles, macOS only.
+#
+# Linked to ~/.config/mise/conf.d/01-dotfiles-macos.toml on Macs.
+
+# apply incoming preference copies right after mise writes them
+[history.reload]
+"~/.config/dotfiles/prefs/*.plist" = "~/.local/bin/dotfiles prefs tick"

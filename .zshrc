@@ -36,18 +36,22 @@ plugins+=(macos)
 source $ZSH/oh-my-zsh.sh
 
 # enable credential injection via 1password
-source ~/.config/op/plugins.sh || true
+[[ -f ~/.config/op/plugins.sh ]] && source ~/.config/op/plugins.sh
 
 # //
 # DevOps
 # //
 
-command -v flux >/dev/null && . <(flux completion zsh)
+# (2>/dev/null: an unrelated "flux" command has no completion subcommand)
+command -v flux >/dev/null && . <(flux completion zsh 2>/dev/null)
 
 # //
 # GCP
 # //
 
-source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"
-source "$(brew --prefix)/share/google-cloud-sdk/completion.zsh.inc"
+for gcloud_inc in path completion; do
+    [[ -f "$HOMEBREW_PREFIX/share/google-cloud-sdk/$gcloud_inc.zsh.inc" ]] &&
+        source "$HOMEBREW_PREFIX/share/google-cloud-sdk/$gcloud_inc.zsh.inc"
+done
+unset gcloud_inc
 

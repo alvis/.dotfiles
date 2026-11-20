@@ -7,7 +7,9 @@ for cmd in rar zip unzip gpg; do
         HAS[$cmd]=1
     else
         HAS[$cmd]=0
-        echo >&2 "WARN: '$cmd' not found. Install via: brew install $cmd"
+        # rar is optional (archive falls back to zip) and a macOS-only app
+        [[ $cmd == rar && $OSTYPE != darwin* ]] ||
+            echo >&2 "WARN: '$cmd' not found. Install via: brew install $cmd"
     fi
 done
 

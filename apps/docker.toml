@@ -1,0 +1,20 @@
+schema = 1
+
+[app]
+id = "docker"
+name = "Docker"
+platforms = ["macos", "linux"]
+install = "brew-cask:docker-desktop"
+
+[compat]
+verified = true
+versions = "4.x"
+checked = "2026-11-20"
+
+[sync]
+strategy = "excluded"
+default = false
+
+[unsafe]
+paths = ["~/.docker/config.json", "~/.dockercfg", "~/.docker/contexts"]
+notes = "Registry credentials live in these files. Docker Desktop settings are machine-specific."

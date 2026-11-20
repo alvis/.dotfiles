@@ -103,10 +103,11 @@ source $ZSH/oh-my-zsh.sh
 # NOTE: must come after oh-my-zsh.sh, which defines the theme's prompt_git
 source $BASE/utilities/jj.zsh
 
-# check if brew is available
-if command -v brew >/dev/null 2>&1; then
+# check if Homebrew packages are available (on Linux, mise installs them
+# into the prefix without the brew command, so test the prefix itself)
+if [[ -n "$HOMEBREW_PREFIX" && -d "$HOMEBREW_PREFIX/share" ]]; then
   # autosuggest the rest of a command
-  AUTO_SUGGESTIONS_PATH="$(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+  AUTO_SUGGESTIONS_PATH="$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
   if [[ -f "$AUTO_SUGGESTIONS_PATH" ]]; then
     source "$AUTO_SUGGESTIONS_PATH"
   else
@@ -114,14 +115,21 @@ if command -v brew >/dev/null 2>&1; then
   fi
 
   # highlight commands whilst they are typed
-  ZSH_SYNTAX_HIGHLIGHTING_PATH="$(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+  ZSH_SYNTAX_HIGHLIGHTING_PATH="$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
   if [[ -f "$ZSH_SYNTAX_HIGHLIGHTING_PATH" ]]; then
     source "$ZSH_SYNTAX_HIGHLIGHTING_PATH"
   else
     echo "WARN: zsh-syntax-highlighting not found, skipping"
   fi
 else
-  echo "WARN: brew not found, some plugins will not be loaded"
+  echo "WARN: no Homebrew packages under ${HOMEBREW_PREFIX:-\$HOMEBREW_PREFIX}, some plugins will not be loaded"
+fi
+
+# mise: per-project tools and environments
+# NOTE: the shell files are symlinks into .dotfiles, so activation lives here
+# rather than in mise's [bootstrap.mise_shell_activate], which would edit them
+if command -v mise >/dev/null 2>&1; then
+  eval "$(mise activate zsh)"
 fi
 
 # cd command with an interactive filter

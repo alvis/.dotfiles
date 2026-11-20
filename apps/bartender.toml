@@ -1,0 +1,49 @@
+schema = 1
+
+[app]
+id = "bartender"
+name = "Bartender"
+platforms = ["macos"]
+install = "brew-cask:bartender"
+
+[compat]
+verified = true
+versions = "5-7"
+checked = "2026-11-20, Bartender 7.2.0, macOS 27.2.1"
+
+[sync]
+strategy = "auto"
+default = true
+method = "defaults"
+reload = "restart-if-running"
+domain = "com.surteesstudios.Bartender"
+bundle_id = "com.surteesstudios.Bartender"
+deny_keys = [
+  "wdsAuthToken",
+  "NotchBar.cached*",
+  "notchbar.agentStatus.*",
+  "com.bartender.windowmap.persistence",
+  "FRFeedbackReporter.*",
+  "TerminationReason*",
+  "trial*",
+  "TestingIdentifierKey",
+  "ResetPermissionCountKey",
+  "BartenderSevenLastGrantedAccessSource",
+  "GoldenGateAXOwnerFailureLedger*",
+  "GoldenGateColdStartCatalog*",
+  "SK2PurchaseIntentUpdatesLastChecked",
+  "SKTransactionUpdatesLastChecked",
+  "onboarding_temp_*",
+  "launchAtLogin.isEnabled",
+]
+
+[unsafe]
+paths = ["~/Library/Preferences/com.surteesstudios.Bartender.plist"]
+notes = """
+The live plist holds an authentication token, a cached location, and window
+state, so it is never tracked directly; only the sanitized export syncs.
+Licensing is not synced: activate Bartender once on each Mac. An incoming
+change quits Bartender (if it is running), applies the settings, and starts it
+again in the background. macOS asks once per Mac for Bartender's Accessibility
+and Screen Recording permissions; those cannot be synced.
+"""

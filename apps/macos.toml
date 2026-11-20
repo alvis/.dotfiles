@@ -1,0 +1,24 @@
+schema = 1
+
+[app]
+id = "macos"
+name = "macOS system preferences"
+platforms = ["macos"]
+install = ""
+
+[compat]
+verified = true
+versions = "14+"
+checked = "2026-11-20"
+
+[sync]
+strategy = "excluded"
+default = false
+
+[unsafe]
+paths = [
+  "~/Library/Preferences/com.apple.symbolichotkeys.plist",
+  "~/Library/Preferences/.GlobalPreferences.plist",
+  "~/Library/Keychains",
+]
+notes = "System-managed through cfprefsd and tied to hardware. Declare shared system defaults with [bootstrap.settings.macos] in mise instead."

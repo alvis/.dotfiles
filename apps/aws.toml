@@ -1,0 +1,27 @@
+schema = 1
+
+[app]
+id = "aws"
+name = "AWS CLI profiles"
+platforms = ["macos", "linux"]
+install = "brew:awscli"
+
+[compat]
+verified = true
+versions = "2.x"
+checked = "2026-11-20"
+
+[sync]
+strategy = "auto"
+default = false
+method = "file"
+reload = "none"
+paths = ["~/.aws/config"]
+
+[unsafe]
+paths = ["~/.aws/credentials", "~/.aws/sso", "~/.aws/cli"]
+notes = """
+Opt-in: ~/.aws/config has no secrets but names account IDs and SSO URLs.
+~/.aws/credentials and the SSO and CLI caches are never tracked; to sync
+credentials deliberately, see Encryption in the README.
+"""

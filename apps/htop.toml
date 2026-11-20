@@ -1,0 +1,23 @@
+schema = 1
+
+[app]
+id = "htop"
+name = "htop"
+platforms = ["macos", "linux"]
+install = "brew:htop"
+
+[compat]
+verified = true
+versions = "3.x"
+checked = "2026-11-20, htop 3.4"
+
+[sync]
+strategy = "auto"
+default = true
+method = "file"
+reload = "none"
+paths = ["~/.config/htop/htoprc"]
+
+[unsafe]
+paths = []
+notes = "htop rewrites htoprc when it exits, so expect a save after each session in which you changed a setting."

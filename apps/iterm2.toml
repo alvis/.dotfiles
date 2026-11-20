@@ -1,0 +1,52 @@
+schema = 1
+
+[app]
+id = "iterm2"
+name = "iTerm2"
+platforms = ["macos"]
+install = "brew-cask:iterm2"
+
+[compat]
+verified = true
+versions = "3.5-3.7"
+checked = "2026-11-20, iTerm2 3.7.8, macOS 27.2.1"
+
+[sync]
+strategy = "auto"
+default = true
+method = "defaults"
+reload = "next-launch"
+domain = "com.googlecode.iterm2"
+bundle_id = "com.googlecode.iterm2"
+deny_keys = [
+  "PrefsCustomFolder",
+  "LoadPrefsFromCustomFolder",
+  "iTerm Version",
+  "*OnboardingWindowHasBeenShown*",
+  "NoSync*",
+  "HotKeyBookmark",
+  "AITermAPI",
+  "Window Arrangements",
+  "Default Arrangement Name",
+  "*Hint*",
+  "kCPKSelectionViewPreferredModeKey",
+]
+
+[unsafe]
+paths = [
+  "~/Library/Preferences/com.googlecode.iterm2.plist",
+  "~/Library/Preferences/com.googlecode.iterm2.private.plist",
+  "~/Library/Application Support/iTerm2",
+]
+notes = """
+iTerm2 is never restarted automatically, because that would end your terminal
+sessions. Incoming settings are applied the next time the dotfiles-watch
+service finds iTerm2 not running (it checks every minute); until then,
+dotfiles config status shows the pending change, and this Mac's own iTerm2
+changes keep syncing.
+If you change the same setting on this Mac before restarting iTerm2, this
+Mac's value is kept and the other one stays in history (dotfiles config
+status lists such keys). Saved window arrangements, scripts, and the shell
+integration files are not synced. iTerm2's own "load preferences from a custom
+folder" option must stay off: it would fight the export.
+"""

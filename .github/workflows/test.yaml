@@ -4,28 +4,127 @@ on:
   push:
     branches:
       - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  MISE_VERSION: 2026.11.11
 
 jobs:
+  lint:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x install.sh setup.sh bin/dotfiles lib/common.sh lib/scan.sh tests/helpers.bash
+      - name: posix sh
+        run: shellcheck -s sh configs/git/setup.sh
+      - name: python
+        run: python3 -m py_compile lib/prefs.py tests/test_prefs.py
+
+  # isolated tests: every test gets its own home, mise state, and local bare
+  # origin; no real GitHub repository or token is involved
   test:
     strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest # Apple Silicon
+          - macos-15-intel # Intel
+          - ubuntu-26.04 # Linux / devcontainer path
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install: false
+      - name: test dependencies
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            brew install bats-core
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq bats zsh
+          fi
+      - name: unit tests (python)
+        run: python3 -m unittest tests/test_prefs.py
+      - name: bats
+        env:
+          DOTFILES_TEST_DEFAULTS: 1
+        run: bats --print-output-on-failure tests/
+
+  # a real install on the disposable runner: blueprint, links, and the
+  # history-watch LaunchAgent publishing on its own to a local origin
+  bootstrap:
+    strategy:
+      fail-fast: false
       matrix:
         os:
           - macos-latest
-          - ubuntu-latest
+          - ubuntu-26.04
     runs-on: ${{ matrix.os }}
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: link this repo to ~/.dotfiles
-        run: ln -s $(pwd) ~/.dotfiles
-      - name: touch Dropbox folder
-        if: ${{ matrix.os == 'macos-latest' }}
+      - uses: actions/checkout@v4
+        with:
+          path: .dotfiles
+      - name: place the checkout at ~/.dotfiles
+        run: ln -s "$GITHUB_WORKSPACE/.dotfiles" ~/.dotfiles
+      - name: package declarations resolve
         run: |
-          mkdir -p ~/Dropbox/Documents/Mackup
-          mkdir -p ~/.dropbox
-          echo 0 > ~/.dropbox/host.db
-          echo $HOME/Dropbox | base64 >> ~/.dropbox/host.db
-          ls -al /Users/runner/Dropbox
-      - name: install
-        run: ./setup.sh
-
+          ./.dotfiles/install.sh --help >/dev/null
+          platform=$( [ "$(uname -s)" = Darwin ] && echo macos || echo linux )-$( [ "$(uname -m)" = x86_64 ] && echo x64 || echo arm64 )
+          curl -fsSL -o /tmp/mise.tgz "https://github.com/jdx/mise/releases/download/v$MISE_VERSION/mise-v$MISE_VERSION-$platform.tar.gz"
+          # the same pinned checksum install.sh verifies
+          want=$(sed -n "s/^  $platform) echo \([0-9a-f]*\) ;;\$/\1/p" .dotfiles/install.sh)
+          test -n "$want"
+          echo "$want  /tmp/mise.tgz" | shasum -a 256 -c -
+          tar -xzf /tmp/mise.tgz -C /tmp
+          /tmp/mise/bin/mise trust ~/.dotfiles/mise.toml
+          /tmp/mise/bin/mise -C ~/.dotfiles bootstrap plan
+          /tmp/mise/bin/mise -C ~/.dotfiles bootstrap packages apply --dry-run
+      - name: install (no packages)
+        env:
+          DOTFILES_OFFLINE: 1
+        run: ~/.dotfiles/install.sh --skip-packages --yes
+      - name: install again (idempotent)
+        env:
+          DOTFILES_OFFLINE: 1
+        run: ~/.dotfiles/install.sh --skip-packages --yes
+      - name: fundamental dotfiles are linked
+        run: |
+          for f in .zshenv .common.zshrc .aliases.d .tmux.conf .gitignore_global; do
+            test -L ~/$f
+          done
+          # .zshrc is the macOS layer; on Linux the machine's own ~/.zshrc loads the core
+          if [ "$RUNNER_OS" = macOS ]; then test -L ~/.zshrc; else grep -q 'source ~/.common.zshrc' ~/.zshrc; fi
+          # every config file, as `git sweep` resolves it (--global skips
+          # ~/.config/git/config whenever the runner's ~/.gitconfig exists)
+          (cd ~ && git config --includes --get alias.sweep)
+      - name: background watcher publishes on its own
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          git init -q --bare /tmp/origin.git
+          mkdir -p ~/.config/jj
+          echo 'v1' > ~/.config/jj/config.toml
+          cat > ~/.config/mise/config.local.toml <<'EOF'
+          [settings.history]
+          sync_interval = "5s"
+          fetch_interval = "5s"
+          [settings.history.watch]
+          debounce = "1s"
+          EOF
+          dotfiles config init file:///tmp/origin.git --apps jj --yes
+          mise bootstrap services status
+          launchctl print "gui/$(id -u)/dev.mise.mise-history" | head -20
+          before=$(git --git-dir=/tmp/origin.git rev-parse main)
+          echo 'edited while only the LaunchAgent runs' > ~/.config/jj/config.toml
+          for i in $(seq 1 120); do
+            [ "$(git --git-dir=/tmp/origin.git rev-parse main)" != "$before" ] && break
+            sleep 1
+          done
+          test "$(git --git-dir=/tmp/origin.git show main:home/.config/jj/config.toml)" = 'edited while only the LaunchAgent runs'
+          dotfiles config doctor

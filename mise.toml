@@ -1,0 +1,187 @@
+# alvis/.dotfiles — the public workstation blueprint.
+#
+# Applied with `mise bootstrap --from <this repository> --from-dir ~/.dotfiles`
+# (install.sh does this for you). Everything here is shared by every user of
+# this repository. Personal application settings never live here; they are
+# tracked into each user's own private `<owner>/.configs` history instead.
+#
+# Re-running is safe: every declarative part skips what already matches.
+
+min_version = "2026.11.11"
+
+# //
+# PACKAGES
+# //
+#
+# `brew:` formulae install through mise's Homebrew manager on Apple Silicon and
+# Linux. On Intel Macs mise skips them and `bin/dotfiles install` installs the
+# same list with the real Homebrew instead (see `brew_intel_fallback`).
+#
+# Third-party tap formulae (usql, kns, git-redate, FluxCD's flux) are not listed here: they
+# publish no API metadata, so mise 2026.11.11 would evaluate their Ruby, which
+# costs GitHub API calls against the anonymous rate limit, crashes mise when
+# it provisions Ruby mid-run on macOS, and is denied by its sandbox on Linux.
+# On macOS `bin/dotfiles install` installs them with Homebrew itself instead
+# (see BREW_TAP_FORMULAE).
+
+[bootstrap.packages]
+# essentials
+"brew:coreutils" = "latest"
+"brew:go" = "latest"
+"brew:python@3.13" = "latest"
+"brew:pipx" = "latest"
+"brew:node" = "latest"
+"brew:git" = "latest"
+
+# terminal
+"brew:tmux" = "latest"
+"brew:zsh" = "latest"
+"brew:zsh-autosuggestions" = "latest"
+"brew:zsh-completions" = "latest"
+"brew:zsh-syntax-highlighting" = "latest"
+
+# terminal utilities
+"brew:the_silver_searcher" = "latest"
+"brew:bat" = "latest"
+"brew:direnv" = "latest"
+"brew:eza" = "latest"
+"brew:fswatch" = "latest"
+"brew:fzy" = "latest"
+"brew:grc" = "latest"
+"brew:htop" = "latest"
+"brew:ranger" = "latest"
+"brew:tree" = "latest"
+"brew:util-linux" = "latest"
+
+# network utilities
+"brew:hey" = "latest"
+"brew:httpie" = "latest"
+"brew:mycli" = "latest"
+"brew:swaks" = "latest"
+"brew:telnet" = { os = "macos" } # needs macOS: built from Apple's libtelnet
+"brew:wget" = "latest"
+
+# archives (macOS ships zip and unzip; rar is the macOS app below)
+"brew:zip" = { os = "linux" }
+"brew:unzip" = { os = "linux" }
+
+# source control and secrets
+"brew:git-extras" = "latest"
+"brew:git-lfs" = "latest"
+"brew:gnupg" = "latest"
+"brew:sops" = "latest"
+"brew:gh" = "latest"
+"brew:jj" = "latest"
+
+# editors
+"brew:micro" = "latest"
+"brew:nano" = "latest"
+
+# devops (macOS only, as before)
+"brew:awscli" = { os = "macos" }
+"brew:awsume" = { os = "macos" }
+"brew:aws-vault" = { os = "macos" }
+"brew:helm" = { os = "macos" }
+"brew:k9s" = { os = "macos" }
+"brew:kind" = { os = "macos" }
+"brew:kubernetes-cli" = { os = "macos" }
+"brew:kubespy" = { os = "macos" }
+"brew:popeye" = { os = "macos" }
+
+# macOS-only command-line tools
+"brew:pinentry-mac" = { os = "macos" }
+"brew:ispell" = { os = "macos" }
+"brew:emacs" = { os = "macos" }
+"brew:terminal-notifier" = { os = "macos" }
+
+# macOS applications
+"brew-cask:1password-cli" = { os = "macos" }
+"brew-cask:bartender" = { os = "macos" }
+"brew-cask:brave-browser" = { os = "macos" }
+"brew-cask:copilot-cli" = { os = "macos" }
+"brew-cask:discord" = { os = "macos" }
+"brew-cask:docker-desktop" = { os = "macos" }
+"brew-cask:gcloud-cli" = { os = "macos" }
+"brew-cask:google-chrome" = { os = "macos" }
+"brew-cask:iterm2" = { os = "macos" }
+"brew-cask:little-snitch" = { os = "macos" }
+"brew-cask:notion" = { os = "macos" }
+"brew-cask:rar" = { os = "macos" }
+"brew-cask:readdle-spark" = { os = "macos" }
+"brew-cask:slack" = { os = "macos" }
+"brew-cask:telegram" = { os = "macos" }
+"brew-cask:visual-studio-code" = { os = "macos" }
+
+# //
+# TOOLS
+# //
+#
+# Language runtimes stay on Homebrew and nvm: the shell configuration points
+# GOROOT at Homebrew's Go and the prompt shows nvm's Node. These are global
+# command-line tools that mise installs through its own backends.
+
+[tools]
+"pipx:poetry" = "latest"
+"npm:csvtojson" = "latest"
+"npm:@json2csv/cli" = "latest" # the json2csv command (the old json2csv package is deprecated)
+"npm:prettyjson" = "latest"
+"npm:autocannon" = "latest"
+
+# //
+# REPOSITORIES
+# //
+#
+# Shell, tmux, and editor plugins. mise clones missing checkouts and leaves
+# existing ones alone, so re-running never re-clones.
+
+[bootstrap.repos]
+"~/.oh-my-zsh" = { url = "https://github.com/ohmyzsh/ohmyzsh.git" }
+"~/.oh-my-zsh/custom/plugins/enhancd" = { url = "https://github.com/babarot/enhancd.git" }
+"~/.oh-my-zsh/custom/plugins/history-search-multi-word" = { url = "https://github.com/zdharma-continuum/history-search-multi-word.git" }
+"~/.oh-my-zsh/custom/plugins/notify" = { url = "https://github.com/marzocchi/zsh-notify.git" }
+"~/.oh-my-zsh/custom/plugins/zsh-nvm" = { url = "https://github.com/lukechilds/zsh-nvm.git" }
+"~/.oh-my-zsh/custom/themes/bullet-train" = { url = "https://github.com/caiogondim/bullet-train.zsh.git" }
+"~/.tmux/plugins/tpm" = { url = "https://github.com/tmux-plugins/tpm.git" }
+"~/.tmux/plugins/maglev" = { url = "https://github.com/caiogondim/maglev.git" }
+"~/.nano" = { url = "https://github.com/scopatz/nanorc.git" }
+
+# //
+# FUNDAMENTAL DOTFILES
+# //
+#
+# Symlinked from this checkout. `bin/dotfiles link` runs first and moves any
+# conflicting file aside (with a backup) only after you confirm.
+
+[dotfiles]
+# .common.zshrc is the shell core for every machine; .zshrc layers the macOS
+# extras (iTerm2, Finder, 1Password, gcloud, flux) on top. On Linux, ~/.zshrc
+# stays the machine's own and `bin/dotfiles bootstrap-steps` makes it load the core.
+zshrc = { source = ".zshrc", variants = [{ os = "macos", target = "~/.zshrc" }] }
+"~/.zshenv" = { source = ".zshenv" }
+"~/.common.zshrc" = { source = ".common.zshrc" }
+"~/.aliases.d" = { source = ".aliases.d" }
+"~/.tmux.conf" = { source = ".tmux.conf" }
+"~/.gitignore_global" = { source = ".gitignore_global" }
+"~/.gemrc" = { source = ".gemrc" }
+"~/.oh-my-zsh/custom/themes/bullet-train.zsh-theme" = { source = "~/.oh-my-zsh/custom/themes/bullet-train/bullet-train.zsh-theme", mode = "copy", create_if_missing = true }
+"~/.local/bin/dotfiles" = { source = "bin/dotfiles" }
+spacemacs = { source = ".spacemacs", variants = [{ os = "macos", target = "~/.spacemacs" }] }
+
+# the shared global mise layer (public; never part of anyone's .configs)
+mise-shared = { source = "mise/global.toml", variants = [{ default = true, target = "{{ mise_config_dir }}/conf.d/00-dotfiles.toml" }] }
+mise-shared-macos = { source = "mise/global.macos.toml", variants = [{ os = "macos", target = "{{ mise_config_dir }}/conf.d/01-dotfiles-macos.toml" }] }
+
+# nano: keep the user's own ~/.nanorc and manage only these lines
+"~/.nanorc/dotfiles" = { block = """
+include "~/.nano/*.nanorc"
+set autoindent
+set mouse
+set smooth""" }
+
+# //
+# SETUP STEPS THAT ARE NOT DECLARATIVE
+# //
+
+[tasks.bootstrap]
+description = "Idempotent setup steps the declarative sections cannot express"
+run = "bin/dotfiles bootstrap-steps"

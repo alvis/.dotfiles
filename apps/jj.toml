@@ -1,0 +1,23 @@
+schema = 1
+
+[app]
+id = "jj"
+name = "Jujutsu"
+platforms = ["macos", "linux"]
+install = "brew:jj"
+
+[compat]
+verified = true
+versions = "0.30+"
+checked = "2026-11-20, jj 0.47.1"
+
+[sync]
+strategy = "auto"
+default = true
+method = "file"
+reload = "none"
+paths = ["~/.config/jj/config.toml"]
+
+[unsafe]
+paths = ["~/.config/jj/repos"]
+notes = "Only the user config file; per-repository state stays local."

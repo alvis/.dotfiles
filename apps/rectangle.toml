@@ -1,0 +1,25 @@
+schema = 1
+
+[app]
+id = "rectangle"
+name = "Rectangle"
+platforms = ["macos"]
+install = "brew-cask:rectangle"
+
+[compat]
+verified = false
+versions = "0.8x"
+checked = "not installed on the reference Mac; domain from Rectangle's documentation"
+
+[sync]
+strategy = "auto"
+default = false
+method = "defaults"
+reload = "restart-if-running"
+domain = "com.knollsoft.Rectangle"
+bundle_id = "com.knollsoft.Rectangle"
+deny_keys = ["lastVersion", "internalTilingNotified"]
+
+[unsafe]
+paths = ["~/Library/Preferences/com.knollsoft.Rectangle.plist"]
+notes = "Not verified on a real install yet: enroll with `dotfiles config add rectangle --unverified`."

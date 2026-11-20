@@ -1,0 +1,52 @@
+# Shared global mise layer from alvis/.dotfiles.
+#
+# Linked to ~/.config/mise/conf.d/00-dotfiles.toml by the blueprint. It is
+# public and identical for everyone, so it is never tracked into anyone's
+# private .configs history. Your own tracking manifest is
+# ~/.config/mise/config.toml, and machine-only state (the origin) is
+# ~/.config/mise/config.local.toml.
+
+# //
+# AUTOMATIC SYNC
+# //
+
+# mise's built-in watcher: saves tracked files, pushes, fetches, and applies
+[bootstrap.services.mise-history]
+builtin = "history-watch"
+
+# alongside it: a secret guard over tracked files (it pauses publishing when
+# one looks like it holds a secret) and, on macOS, the preference-domain sync
+[bootstrap.services.dotfiles-watch]
+scope = "user"
+command = "~/.local/bin/dotfiles watch"
+description = "Guard .configs against secrets and sync macOS app preferences"
+restart = "always"
+
+[settings.history]
+# push at most every 5 minutes after a save, fetch every 10 minutes
+sync_interval = "5m"
+fetch_interval = "10m"
+
+[settings.history.watch]
+# wait for a file to stay quiet before saving, so bursts become one checkpoint
+debounce = "30s"
+
+[history]
+# show which machine made each checkpoint
+git_email = "mise@{hostname}"
+
+# never save these anywhere under a tracked path
+exclude = [
+  ".DS_Store",
+  "*.sqlite",
+  "*.sqlite-*",
+  "*.db",
+  "*.db-*",
+  "Cookies*",
+  "*.log",
+  "Cache",
+  "Caches",
+  "*.lock",
+  ".env",
+  ".env.*",
+]

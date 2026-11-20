@@ -1,0 +1,29 @@
+schema = 1
+
+[app]
+id = "little-snitch"
+name = "Little Snitch"
+platforms = ["macos"]
+install = "brew-cask:little-snitch"
+
+[compat]
+verified = true
+versions = "5-6"
+checked = "2026-11-20, macOS 27.2.1"
+
+[sync]
+strategy = "manual"
+default = false
+
+[unsafe]
+paths = [
+  "~/Library/Preferences/at.obdev.littlesnitch.plist",
+  "~/Library/Preferences/at.obdev.littlesnitch.networkmonitor.plist",
+  "~/Library/Preferences/at.obdev.LittleSnitchNetworkMonitor.plist",
+  "~/Library/Application Support/Little Snitch",
+]
+notes = """
+Rules live in a root-owned system store, and the per-user plists hold UI state
+only. Use Little Snitch > Settings > Backup to export rules and import them on
+the other Mac. Little Snitch also offers its own iCloud rule sync.
+"""

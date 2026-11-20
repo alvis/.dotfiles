@@ -21,8 +21,10 @@ fi
 # JJ PROMPT
 # //
 if [ ! -n "${BULLETTRAIN_JJ_PREFIX+1}" ]; then
-  # \ue0a0 is the powerline branch glyph, matching the git segment prefix
-  BULLETTRAIN_JJ_PREFIX=$'\ue0a0 '
+  # U+E0A0, the powerline branch glyph matching the git segment prefix, as
+  # UTF-8 bytes: $'\ue0a0' fails with "character not in range" without a
+  # UTF-8 locale
+  BULLETTRAIN_JJ_PREFIX=$'\xee\x82\xa0 '
 fi
 if [ ! -n "${BULLETTRAIN_JJ_SUFFIX+1}" ]; then
   BULLETTRAIN_JJ_SUFFIX=""

@@ -1,0 +1,23 @@
+schema = 1
+
+[app]
+id = "micro"
+name = "micro editor"
+platforms = ["macos", "linux"]
+install = "brew:micro"
+
+[compat]
+verified = true
+versions = "2.x"
+checked = "2026-11-20, micro 2.0.14"
+
+[sync]
+strategy = "auto"
+default = true
+method = "file"
+reload = "none"
+paths = ["~/.config/micro/settings.json", "~/.config/micro/bindings.json"]
+
+[unsafe]
+paths = ["~/.config/micro/backups", "~/.config/micro/buffers"]
+notes = "Backups and cursor history stay local."

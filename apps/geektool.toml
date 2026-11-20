@@ -1,0 +1,25 @@
+schema = 1
+
+[app]
+id = "geektool"
+name = "GeekTool"
+platforms = ["macos"]
+install = ""
+
+[compat]
+verified = false
+versions = "3.x"
+checked = "app no longer distributed"
+
+[sync]
+strategy = "excluded"
+default = false
+
+[unsafe]
+paths = [
+  "~/Library/Preferences/org.tynsoe.GeekTool.plist",
+  "~/Library/Preferences/org.tynsoe.geektool3.plist",
+  "~/Library/Preferences/org.tynsoe.geeklet.shell.plist",
+  "~/Library/Preferences/org.tynsoe.geeklet.image.plist",
+]
+notes = "Legacy Mackup entry. `dotfiles config init` reports these Mackup links and leaves them alone."

@@ -13,21 +13,34 @@ Linux)
     ;;
 *)
     # unsupported OS
-    echo "FATAL: THIS SETUP DOES NOT SUPPORT $(uname)"
+    echo "FATAL: THIS SETUP DOES NOT SUPPORT $(uname)" >&2
     ;;
 esac
 
-eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
+# load Homebrew only once it is installed
+if [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+    eval "$("$HOMEBREW_PREFIX/bin/brew" shellenv)"
+elif [[ -d "$HOMEBREW_PREFIX/bin" ]]; then
+    # on Linux, mise installs Homebrew packages into the prefix without the
+    # brew command itself, so put the prefix on the search paths directly
+    export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:$PATH"
+    export MANPATH="$HOMEBREW_PREFIX/share/man${MANPATH+:$MANPATH}:"
+    export INFOPATH="$HOMEBREW_PREFIX/share/info:${INFOPATH:-}"
+fi
 
 # //
 # DEVELOPMENT
 # //
 
-# compilation flags
-export ARCHFLAGS="-arch x86_64"
+# compilation flags: build native extensions for this Mac's own architecture
+[[ "$(uname)" == Darwin ]] && export ARCHFLAGS="-arch $(uname -m)"
 
-# language environment
+# language environment: a UTF-8 locale this machine has (minimal Linux installs
+# ship only C.UTF-8; a missing locale drops zsh to ASCII and breaks the prompt)
 export LANG=en_US.UTF-8
+if [[ "$(uname)" == Linux ]] && ! locale -a 2>/dev/null | grep -Eqix 'en_US\.utf-?8'; then
+    export LANG=C.UTF-8
+fi
 
 # preferred editors
 if command -v micro >/dev/null; then
@@ -43,7 +56,7 @@ fi
 # TOOLS
 # //
 
-export PATH=$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH
+[[ -d "$HOMEBREW_PREFIX/opt/coreutils/libexec/gnubin" ]] && export PATH=$HOMEBREW_PREFIX/opt/coreutils/libexec/gnubin:$PATH
 
 # //
 # NODE
@@ -57,9 +70,11 @@ export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || pr
 # //
 
 export GOPATH=$HOME/go
-export GOROOT=$(brew --prefix)/opt/go/libexec
 export PATH=$GOPATH/bin:$PATH
-export PATH=$GOROOT/bin:$PATH
+if [[ -d "$HOMEBREW_PREFIX/opt/go/libexec" ]]; then
+    export GOROOT=$HOMEBREW_PREFIX/opt/go/libexec
+    export PATH=$GOROOT/bin:$PATH
+fi
 
 # //
 # PYTHON

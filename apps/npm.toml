@@ -1,0 +1,20 @@
+schema = 1
+
+[app]
+id = "npm"
+name = "npm"
+platforms = ["macos", "linux"]
+install = "brew:node"
+
+[compat]
+verified = true
+versions = "10+"
+checked = "2026-11-20"
+
+[sync]
+strategy = "excluded"
+default = false
+
+[unsafe]
+paths = ["~/.npmrc"]
+notes = "~/.npmrc usually holds registry auth tokens. Keep it local, or sync an encrypted copy deliberately (README, Encryption)."

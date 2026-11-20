@@ -4,76 +4,486 @@
 
 # dotfiles
 
-Awesome dotfiles for MacOS and the PRO, along with powerful configurations for emacs, tmux and zsh.
+Awesome dotfiles for macOS and the PRO, along with powerful configurations for emacs, tmux and zsh.
 
 [![license](https://img.shields.io/github/license/alvis/.dotfiles.svg)](LICENSE)
 
 </div>
 
-This repository contains configurations for CLI commands and X environments, along with powerfully customized Vim, Zsh and Tmux environments for nerds.
+This repository sets up a Mac (or a Linux devcontainer) with one command: the
+applications, developer tools, and the zsh, tmux, Git, and editor
+configuration I use every day. Your own application settings follow you from
+machine to machine through a private repository that only you own.
 
 ![screenshot](screenshot.png)
 
-Welcome, no matter you are looking around how other configure their development environment, or checking me out for my work, welcome.
-This repository serves as my way to help me setup and maintain my Mac.
-It takes the effort out of installing everything manually.
-Everything which is needed to install my preferred setup of macOS is detailed in this readme.
-Feel free to explore, learn and copy parts for your own dotfiles. Enjoy!
+**Review before you run.** These are opinionated settings. Read the code,
+keep what you like, and remove what you don't.
 
-In a nut shell, the .dotfiles in this repository contain:
+## Contents
 
-1. configurations for zsh, tmux and spacemacs
-2. handful of tools such as nvm and miniconda for managing different development environments
-3. tons of CLI utilities, from file management to sending email through the terminal
-4. many DevOps tools for AWS and K8S
+- [Install](#install)
+- [How it is organized](#how-it-is-organized)
+- [Personal settings: your private `.configs`](#personal-settings-your-private-configs)
+- [What syncs and what does not](#what-syncs-and-what-does-not)
+- [Managing applications](#managing-applications)
+- [How automatic sync works](#how-automatic-sync-works)
+- [Conflicts](#conflicts)
+- [Security](#security)
+- [Migrating from Mackup](#migrating-from-mackup)
+- [Recovery and rollback](#recovery-and-rollback)
+- [Updating](#updating)
+- [Platforms and limitations](#platforms-and-limitations)
+- [Development](#development)
+- [Git sweep](#git-sweep)
 
-## Important Notes
+## Install
 
-### Mackup Compatibility Issue with macOS 14 (Workaround Available)
-
-Mackup's preference syncing is currently broken on macOS 14 due to changes in the operating system's security model. Under the new model, macOS no longer follows symlinked application preferences, causing a reset of preferences every time an application starts. For more details, refer to this [GitHub discussion](https://github.com/lra/mackup/issues/1924).
-
-Despite this issue, you can still manually sync preferences and configurations by copying them to and from cloud storage. This approach avoids the symlink problem, effectively allowing preference synchronization across devices.
-
-#### Copying Preferences and Configurations to Cloud Storage
-
-Run the following command to back up your preferences and remove symlinks:
-
-```bash
-mackup backup --force && mackup uninstall --force
-```
-
-#### Restoring Preferences and Configurations from Cloud Storage
-
-Use this command to restore your preferences and remove symlinks:
-
-```bash
-mackup restore --force && mackup uninstall --force
-```
-
-This workaround ensures you can continue syncing preferences until a permanent solution is available.
-
-## Installation
-
-**Warning**:
-If you would like to give these dotfiles a try, try to play around.
-But I strongly encourage you to review the code, and add or remove things you don’t want or need.
-Don’t blindly use my settings unless you know what that entails. Use at your own risk!
-
-1. Clone the .dotfiles to home.
+### Another Mac, when you already have a `.configs` repository
 
 ```sh
-git clone https://github.com/alvis/.dotfiles ~/.dotfiles
+curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/master/install.sh \
+  | bash -s -- --config <github-user>/.configs
 ```
 
-2. Run the installation script.
+### Your first Mac
+
+Add `--init`. It publishes this Mac's settings as a new history in a private
+repository. If the repository doesn't exist yet, you're asked before it's
+created as private:
 
 ```sh
-~/.dotfiles/setup.sh
+curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/master/install.sh \
+  | bash -s -- --init --config <github-user>/.configs
 ```
 
-3. In tmux, type `prefix + I` to install packages
-4. Install fonts: `Hack` & `Input Mono`
+### Without personal settings
+
+Leave out `--config` to install only the shared setup.
+
+### What the command does
+
+1. Checks the OS (macOS 14 or later, or Linux 5.18 or later running natively), the CPU (Apple Silicon, Intel, x86_64, or arm64), and the Xcode Command Line Tools.
+2. Installs Homebrew on macOS, if it is missing, through Homebrew's own installer. That installer is fetched from Homebrew's `HEAD`, as Homebrew documents; it is the one step not pinned by this repository.
+3. Installs [mise](https://mise.jdx.dev) 2026.11.11 to `~/.local/bin/mise`. The archive is checked against a pinned SHA-256.
+4. Clones this repository to `~/.dotfiles`, or uses the checkout that's already there.
+5. Links the fundamental dotfiles. If you have your own `~/.zshenv` or similar, you're asked first, and it's backed up before anything is replaced. `~/.zshrc` is linked on macOS only, because `.zshrc` layers the macOS extras on top of the shared `.common.zshrc`. On Linux, `~/.zshrc` stays your own, or the container image's, and gets one line that loads `~/.common.zshrc`. Links left by the old setup are repaired: one that no longer resolves (such as `~/.common.zshrc` through the removed `setup/` folder) is relinked, and the `~/.dotfilesrc`, `~/.mackup`, and `~/.mackup.cfg` links to files this repository no longer has are moved aside. Both are backed up.
+6. Runs `mise bootstrap` from `~/.dotfiles/mise.toml`. This installs the Homebrew formulas, apps, and tools, clones the zsh, tmux, and nano plugins, and runs the setup steps that aren't declarative. Running the installer is your consent to this, so mise doesn't ask about each part again. On macOS, the four third-party tap formulas (`usql`, `kns`, `git-redate`, and FluxCD's `flux`) are installed by Homebrew itself, which needs no GitHub API calls.
+7. With `--config`: signs you in to GitHub if needed. A browser opens once.
+8. Restores your `.configs` history, or with `--init` creates it.
+9. Starts the two background services and checks them (`dotfiles config doctor`).
+10. Lists what is still manual (see [Platforms and limitations](#platforms-and-limitations)).
+
+Running it again is safe. Anything that already matches is left alone, so an
+interrupted run continues where it stopped. The installer never runs as root,
+and it never adds a sudo rule.
+
+What it asks you, measured on a fresh macOS 26 virtual machine and a fresh
+Ubuntu 24.04 container:
+
+- **macOS:** your password once, before Homebrew is installed. Homebrew then
+  runs without its own "Press RETURN" pause. Casks that install privileged
+  helpers (Docker Desktop, for example) may ask again if more than 5 minutes
+  have passed. With `--init`, one more question: whether to publish the files
+  it lists.
+- **Linux:** your password once, so mise can create `/home/linuxbrew`.
+- Your own files are the only other reason it stops to ask: a `~/.zshenv` of
+  yours (or `~/.zshrc` on macOS), or a file that differs from your `.configs`.
+
+Warnings printed during the run are repeated at the end, so they aren't lost
+above the package output. The run fails, with the reason, if the final
+`dotfiles config doctor` check finds a problem. Afterwards the installer
+deletes the downloaded installers, bottles, and Go build caches that mise and
+Homebrew would otherwise keep for weeks (about 11 GB on a new Mac); what is
+installed never refers back to them.
+
+| Option | Meaning |
+| --- | --- |
+| `--config OWNER/REPO` | Your private settings repository. Full Git URLs work too. |
+| `--init` | Allow publishing a new history (first machine). |
+| `--apps a,b` | With `--init`: which applications to enroll. The default is the registry's default set. |
+| `--config-ref BRANCH` | Keep the history on a branch of an existing repository. |
+| `--take-remote` | When adopting, replace local files that differ with the `.configs` version. This can be undone with `mise dot undo`. |
+| `--skip-packages` | Don't install packages or tools. |
+| `--ref REF` | On a fresh clone, check out a specific branch, tag, or commit of `.dotfiles`. Pin a commit for reproducibility. An existing checkout is left as it is. |
+| `--dry-run` | Preview without changing anything. On a fresh machine the preview stops after the mise and clone steps, because the rest needs them. |
+| `--yes` | Answer yes to the ordinary confirmations. |
+
+After installing: open a new terminal, press `prefix + I` in tmux once, and
+install the fonts Hack and Input Mono.
+
+## How it is organized
+
+Two repositories, with one owner each:
+
+| | `alvis/.dotfiles` (public, shared) | `<you>/.configs` (private, yours) |
+| --- | --- | --- |
+| Holds | How a machine is built: packages, apps, tools, fundamental dotfiles, Git aliases, the app registry | Your personal application settings |
+| Format | An ordinary Git checkout at `~/.dotfiles` | mise's own history format (`.mise-history/`, `home/`, `config/`) |
+| On disk | Symlinks: `~/.zshrc -> ~/.dotfiles/.zshrc` and so on | Regular files in their real locations, never symlinks |
+| Changes by | Editing `~/.dotfiles` and committing | Using your apps; the watcher saves and syncs on its own |
+
+```text
+.dotfiles/
+├── install.sh              one-command entry point
+├── mise.toml               the blueprint: packages, tools, plugin repos, symlinks, bootstrap task
+├── mise/global.toml        shared mise layer: sync service, intervals, exclusions
+├── mise/global.macos.toml  macOS layer: preference sync service and reload hook
+├── apps/*.toml             application registry (how settings are found and synced)
+├── bin/dotfiles            wrapper around native mise commands
+├── lib/                    shell helpers, secret scan, macOS preference adapter
+├── configs/git/            shared Git aliases, including git sweep
+├── .zshrc .zshenv .common.zshrc .aliases.d/ .tmux.conf .gitignore_global ...
+└── tests/                  bats and Python tests (two-machine sync end to end)
+```
+
+mise reads three configuration layers. Each has one owner, so none of them can
+overwrite another:
+
+| File | Owner | Shared through |
+| --- | --- | --- |
+| `~/.config/mise/conf.d/00-dotfiles.toml` (and `01-dotfiles-macos.toml`) | `.dotfiles`: a symlink to `mise/global*.toml` | this public repository; never tracked into `.configs` |
+| `~/.config/mise/config.toml` | you: the tracking manifest that `mise dot track` writes | your `.configs`, so a new machine restores your enrollment |
+| `~/.config/mise/config.local.toml` | this machine only: the origin URL and local overrides | nothing (mise never shares `*.local.toml`) |
+
+Git works the same way. `~/.config/git/config` is machine-local and owned by
+`.dotfiles`: it holds the shared aliases include, the global ignore file, the
+Git LFS filter, and the GitHub credential helper. `~/.gitconfig` is personal:
+name, email, signing key, and preferences. It is what syncs, so syncing can
+never remove the shared include or break Git authentication.
+
+To customize without forking, put overrides in `~/.gitconfig`, which wins over
+`~/.config/git/config`. Machine-only mise settings go in
+`~/.config/mise/config.local.toml`, and per-machine shell additions in files
+that `.zshrc` already sources, such as `~/.config/op/plugins.sh`.
+
+## Personal settings: your private `.configs`
+
+`.configs` is a mise **setup repository**: the history that `mise dot track`
+and the `history-watch` service keep, published with `mise dot origin set`. It
+contains only `.mise-history/`, `config/config.toml` (your manifest), and
+`home/<path>` for each tracked file. Public `.dotfiles` files never enter it.
+After every publication, `dotfiles config init` checks this on the remote
+copy.
+
+**First machine** (`--init`, or `dotfiles config init <owner/repo>`):
+
+1. The repository must be empty or missing. A missing GitHub repository is created as **private** after you confirm. A repository with unrelated commits is refused unchanged. To keep its content, publish to a new branch with `--ref mise-history`, which never touches the existing branches.
+2. The command proposes a manifest from the registry's default applications. It lists Mackup links it finds, and converts the ones an enrolled app uses into regular files, keeping the Mackup copy.
+3. Every candidate file is secret-scanned **before** it's tracked. A finding stops enrollment, and nothing is saved.
+4. It tracks the files and the manifest, then scans the **whole local history**. A finding stops publication.
+5. It connects the origin (`mise dot origin set <url> --sync manual`; see [How automatic sync works](#how-automatic-sync-works)), starts the services, publishes, and verifies the remote.
+
+**Another machine** (`--config`, or `dotfiles config adopt <owner/repo>`):
+
+1. The command reads the remote manifest first and checks it against the [manifest policy](#the-manifest-policy). If it declares anything else, such as tasks, tools, hooks, environment variables, or paths outside the registry, nothing is adopted. `--yes` doesn't override this. Adoption then restores tracked files only (`mise bootstrap --adopt --only dotfiles`), and the restored manifest is checked again. If it changed in between and fails, the adoption is undone.
+2. `mise bootstrap --adopt` fetches the history, restores each file to its path, and remembers the origin. A local file that differs pauses adoption, and nothing is overwritten. Take the `.configs` version of one file with `dotfiles config resolve <path> --take-remote`, or of every file with `--take-remote`. Replaced versions are saved first, so `mise dot undo` reverts. To keep this machine's version instead, copy it aside, take the remote one, then copy yours back. It then syncs to your other machines:
+
+   ```sh
+   cp ~/.config/micro/settings.json ~/.config/micro/settings.json.mine
+   dotfiles config resolve ~/.config/micro/settings.json --take-remote
+   cp ~/.config/micro/settings.json.mine ~/.config/micro/settings.json
+   ```
+
+   `--keep-local` only applies once a file is tracked on this machine. Don't run `mise dot track` by hand during a paused adoption, because that starts a local history unrelated to `.configs`.
+3. Per-app actions run, preference copies are applied, the services start, and the origin is verified.
+
+Nothing needs copying from another machine: mise state, the origin, and the
+services are all recreated from the two repositories.
+
+## What syncs and what does not
+
+| Application | Policy | How |
+| --- | --- | --- |
+| Bartender | auto | Sanitized preference export (see below). If an incoming change arrives while Bartender runs, it is quit and restarted. |
+| iTerm2 | auto | Sanitized preference export. Incoming changes apply the next time the service finds iTerm2 **not** running, because restarting it would end your sessions. Your own iTerm2 changes keep syncing meanwhile. |
+| Git identity (`~/.gitconfig`) | auto | Tracked in place |
+| Jujutsu (`~/.config/jj/config.toml`) | auto | Tracked in place |
+| micro (`settings.json`, `bindings.json`) | auto | Tracked in place |
+| htop (`htoprc`) | auto | Tracked in place |
+| AWS CLI profiles (`~/.aws/config`) | opt-in | `dotfiles config add aws`. Names account IDs, so it's not in the default set. |
+| Rectangle | opt-in, unverified | `dotfiles config add rectangle --unverified` |
+| Little Snitch | manual | Rules live in a root-owned store. Use Little Snitch's own backup and restore. |
+| npm, Docker, AWS credentials | excluded | They hold tokens. To sync one deliberately, see [Encryption](#encryption). |
+| Buku | excluded | A live SQLite database. Use `buku --export` and `buku --import`. |
+| macOS system preferences | excluded | System-managed. Declare shared defaults with mise's `[bootstrap.settings.macos]`. |
+| Fundamental dotfiles | not in `.configs` | They come from this repository, as symlinks. |
+
+`dotfiles config list` shows the current registry and what is enrolled.
+
+### macOS preference domains
+
+macOS apps read preferences through `cfprefsd`, which caches them. If a file
+under `~/Library/Preferences` is replaced while the app runs, the app later
+writes its cached copy back, and the watcher would then sync the old value to
+every machine. Symlinks there are ignored since macOS 14. Many of these plists
+also hold secrets: Bartender's contains an authentication token and your cached
+location, for example.
+
+So the live plist is never tracked. The `dotfiles-watch` user service polls
+each enrolled domain every 60 seconds through `defaults export`. It removes
+volatile and secret keys (`deny_keys` plus a global list: window frames,
+updater state, tokens, licenses, locations, iTerm2's `NoSync*`). It then writes
+`~/.config/dotfiles/prefs/<domain>.plist` as sorted XML, mode 0600. That file
+is what mise tracks and syncs.
+
+When mise writes an incoming copy, a reload hook runs `dotfiles prefs tick`.
+The tick merges the copy key by key into the live domain:
+
+- a key changed on one side takes that side;
+- a key changed differently on both sides keeps this Mac's value, records it, and leaves the other value in history (`dotfiles config status` lists such keys);
+- keys never exported, such as tokens, stay as they are.
+
+The result is applied with `defaults import` while the app is stopped. On a
+new machine with no local history, the incoming copy wins.
+
+## Managing applications
+
+```sh
+dotfiles config list               # registry, policies, what is enrolled
+dotfiles config add bartender      # find, secret-scan, and enroll an app
+dotfiles config remove bartender   # stop tracking; the app's settings stay as they are
+dotfiles config status             # tracked files, watcher, pending changes, conflicts
+dotfiles config sync               # save, push, fetch, and apply now
+dotfiles config doctor             # versions, layers, origin, background auth, services
+dotfiles config resolve <path> --diff | --take-remote | --keep-local
+```
+
+`remove` only affects future checkpoints. Versions already published stay in
+your `.configs` history; see [Removing data from history](#removing-data-from-history).
+
+An app that isn't installed yet still restores. Its file or preference domain
+is in place before the app first launches.
+
+To add an application, write `apps/<id>.toml` (the schema is in
+[apps/README.md](apps/README.md)) and check the paths against a real install.
+Mark it `verified = false` until then.
+
+## How automatic sync works
+
+Two user services (LaunchAgents on macOS, systemd user units on Linux) run
+from login, and both restart if they stop:
+
+- **`mise-history`** is mise's built-in `history-watch`. It watches tracked paths and saves a checkpoint once a file has been quiet for **30 seconds**. A file that keeps changing is saved less often, down to once a day. Every **10 minutes** it rescans everything to catch missed events. Its sync mode is pinned to `manual`, so it never pushes or pulls on its own.
+- **`dotfiles-watch`** (`dotfiles watch`) does the exchange, every **5 minutes** (mise's `history.sync_interval`), through two gates:
+  1. **Publish gate.** It saves pending changes and scans the tracked files and every checkpoint not yet on the origin for secrets. It also checks your manifest against the [policy](#the-manifest-policy). Only when all of that is clean does it run `mise dot sync`, which pushes and fetches. mise never force-pushes.
+  2. **Incoming gate.** It reads the configuration that was just fetched. If it passes the policy, `mise dot pull` applies the incoming changes: a protective checkpoint first, every write journaled, reload commands afterwards. If it doesn't pass, nothing is applied and you're notified.
+
+  It also checks changed tracked files every 15 seconds, and on macOS it syncs preference domains every minute.
+
+So a change typically reaches another machine within about 10 minutes. Run
+`dotfiles config sync` to run the same gated exchange now. A failed exchange,
+such as a network or authentication error, retries at the next interval, and
+local saves continue meanwhile. You get one notification when exchanges start
+failing. `dotfiles config status` and `dotfiles config doctor` report the
+failure until an exchange succeeds. The output of the last exchange is in
+`~/.local/state/dotfiles/last-exchange.log`, and the service's own log is
+`~/.local/state/dotfiles/watch.log`, since the service manager discards its
+output.
+
+The services need a desktop login on macOS and a systemd user session on
+Linux. Installing over SSH on a Mac nobody has logged into skips them with a
+warning, so log in and run `dotfiles install` again. In a container without
+systemd they can't run, and settings sync only when you run
+`dotfiles config sync`. With a `.configs` origin connected, `dotfiles config
+doctor` warns about either case. Services that could run but aren't running
+count as a problem. Change the interval in
+`~/.config/mise/config.local.toml` (`[settings.history]`) on one machine, or in
+`mise/global.toml` for everyone.
+
+**Why not mise's own automatic pull?** The synced manifest
+(`~/.config/mise/config.toml`) is mise's global configuration, which mise
+applies without `mise trust`. With mise's own automatic pull, anything pushed
+to `.configs` would take effect on every machine within minutes: an `[env]`
+script or a `[hooks]` command at the next prompt, or a `[history.reload]`
+command during the pull itself. The incoming gate stops that before anything is
+written. The cost is that the exchange depends on `dotfiles-watch` running.
+`dotfiles config doctor` reports when it isn't running, or when mise's own sync
+mode was switched back on.
+
+### The manifest policy
+
+Settings that come from `.configs` may contain only:
+
+- `[dotfiles]` entries with `mode = "track"` (optionally `encrypt = true`) for paths in the registry (`apps/*.toml` with `strategy = "auto"`) and for the manifest itself;
+- `[history]` `exclude`, `include`, and `git_email`;
+- `[settings.history]` `sync_interval` and `fetch_interval`, and `[settings.history.watch]` `debounce`;
+- `min_version`.
+
+Everything else is refused when publishing, adopting, and pulling. mise parses
+the file (`mise config get`), so quoting tricks don't get past the check. Keep
+machine-local mise configuration in `~/.config/mise/config.local.toml`, which
+never syncs: global tools (note that `mise use -g` writes to the synced
+manifest; use `mise use -g --path ~/.config/mise/config.local.toml`),
+environment variables, and encryption recipients. Check a file with
+`dotfiles config policy [file]`.
+
+### GitHub authentication
+
+The installer signs you in with the GitHub CLI (`gh auth login`). It then
+writes a credential helper for `https://github.com` into the machine-local
+`~/.config/git/config`, using gh's absolute path. The LaunchAgent, which has no
+shell environment, can then use it. `dotfiles config doctor` checks this with
+`git ls-remote` in a minimal environment like the agent's.
+
+Don't run `gh auth setup-git`: it writes a machine-specific path into the
+synced `~/.gitconfig`. SSH origins work too, with an SSH agent the service can
+reach, or a deploy key scoped to the repository.
+
+## Conflicts
+
+If two machines change the same file before seeing each other's change, mise
+**pauses** sharing for the whole setup. Both versions are kept: yours on disk,
+the other in the fetched history. Local saves and fetching continue, and a
+desktop notification points you to the status (allow notifications for mise
+the first time).
+
+```sh
+dotfiles config status                          # what is in conflict
+dotfiles config resolve ~/.gitconfig --diff     # compare both sides
+dotfiles config resolve ~/.gitconfig --keep-local
+dotfiles config resolve ~/.gitconfig --take-remote   # yours is saved first; mise dot undo reverts
+```
+
+To combine both versions, edit the file, then run `mise dot save <path>` and
+`--keep-local`. Sync resumes on its own once nothing is left in conflict. A
+few cases, such as changed tracking settings, can't be resolved with `pull`.
+`mise dot status` then prints the Git commands to run in a separate clone.
+
+## Security
+
+- **Allowlist, not discovery.** Only paths named in the registry are tracked. Whole directories such as Mackup's old `~/.config` entry are not.
+- **Secret filters.** mise drops credential-named files (`*.pem`, `id_*`, `*token*`, `credentials*`, and others). On top of that, `dotfiles` scans **contents** with auditable rules in [lib/scan.sh](lib/scan.sh): private keys, AWS, GitHub, GitLab, Slack, Google, Stripe, npm, OpenAI, and Anthropic tokens, JWTs, bearer tokens, passwords in URLs, and `password`/`secret`/`token = …` assignments. It also runs `gitleaks` when that is installed. Findings name the rule and the file, never the value. The scan runs:
+  - when an app is enrolled, before anything is tracked, and on the mise manifest before it is tracked;
+  - on every blob in the local history before the first publication, so a secret saved earlier and later deleted is still caught;
+  - **before every push**, on the tracked files and on every checkpoint the push would publish. A finding pauses publishing and shows a notification and a note in `dotfiles config status`. The scan is pattern-based, so it is a strong safety net but not a proof. Encrypt files that are meant to hold secrets.
+- **When publishing is paused**, remove the secret from the file and run `dotfiles config sync`. It tells you whether a saved checkpoint still holds the secret. If so, and the file was never published, run `mise dot history purge <path>`. Otherwise run `dotfiles config adopt <owner/repo> --replace-history`. That replaces this machine's unpublished checkpoints with the origin's history and keeps your files as they are on disk. Rotate the credential anyway.
+- **The repository is never made public** by any command. A missing repository is only created with `--private`, and only after you confirm.
+- **Untrusted content.** The [manifest policy](#the-manifest-policy) is enforced when adopting, publishing, and pulling. Incoming preference copies can't set keys the registry denies, such as iTerm2's custom preferences folder. Registry files can name only built-in actions, never shell code. Arguments are validated: repository names, branch names, and home-relative paths. Credentials are never accepted in URLs and are redacted from output.
+- **Trust root.** Whoever can push to your `.configs` can change the settings of your apps. Some of those settings run commands by design: Git aliases and `core.pager` in `~/.gitconfig`, and iTerm2 profile commands. The policy stops mise-level escalation, but it can't make app settings harmless. Keep the repository private, with two-factor authentication and no collaborators.
+- **The installer** runs as your user and adds no sudo rule. The script runs only once it has downloaded completely. The mise archive is checksum-verified, and `--ref <commit>` pins `.dotfiles` on a fresh clone.
+
+### Encryption
+
+To sync a sensitive file deliberately, use mise's age encryption. The file
+needs a registry entry (`apps/<id>.toml`, `strategy = "auto"`), as every synced
+path does. Set the recipients **before** the file's first save, on each
+machine, in the machine-local config:
+
+```sh
+age-keygen -o ~/.config/mise/age.txt             # a dedicated key; back up the private half offline
+cat >>~/.config/mise/config.local.toml <<'EOF'
+[settings.history.encryption]
+recipients = ["age1...", "age1-recovery-key..."]
+EOF
+mise dot track --encrypt ~/.npmrc
+```
+
+Add a second, offline **recovery recipient**, so losing one machine's key
+doesn't lose the data. Copy the private key to each machine yourself; it is
+never tracked. mise refuses to publish plaintext of a path that was encrypted
+before, and this setup never enables `allow_plaintext_history`. **Encrypting
+later does not remove plaintext from earlier commits.**
+
+### Removing data from history
+
+`dotfiles config remove` and `mise dot untrack` stop future saves only. To
+erase a file that was saved but never published, run
+`mise dot history purge <path>`. If it was already published:
+
+1. Rotate the credential first.
+2. Stop the watcher on every machine: `mise bootstrap services apply` with the service removed, or `launchctl bootout gui/$(id -u)/dev.mise.mise-history`.
+3. Rewrite the repository with `git filter-repo` in a separate clone, as mise's [plaintext guide](https://mise.jdx.dev/dotfiles/encryption.html#remove-plaintext-from-history) describes, and force-push it yourself. No command here does that for you.
+4. On each machine, adopt again: `mise bootstrap --adopt <owner/repo> --replace-history --yes`.
+
+## Migrating from Mackup
+
+Mackup is no longer needed. Since macOS 14 its symlinked preferences don't
+work anyway.
+
+1. Leave your Mackup storage (Dropbox or iCloud) **as it is**. Nothing here deletes or modifies it.
+2. Run the first-machine install with `--init`. Every Mackup link it finds is listed. If an enrolled app uses one, it's replaced by a regular copy of its current content. The link itself is recorded under `~/.local/state/dotfiles/backups/`, and the Mackup copy stays untouched.
+3. Leave other Mackup links alone, or turn them into regular files later with Mackup's own `mackup uninstall` (current versions copy the files back before removing the links).
+4. The installer moves aside the `~/.mackup.cfg` and `~/.mackup` links into this repository, which no longer has those files. Your own copies, if they aren't such links, stay; remove them when you're done.
+
+**Rollback:** your Mackup storage was never touched. Put a backed-up link back
+with `mv ~/.local/state/dotfiles/backups/<time>/<path>.mackup-link <path>`, or
+run `mackup restore`.
+
+## Recovery and rollback
+
+| Situation | What to do |
+| --- | --- |
+| An install was interrupted | Run the same command again. |
+| A file was replaced by the installer | It's in `~/.local/state/dotfiles/backups/<time>/`. Move it back. |
+| An incoming change broke an app's settings | Run `mise dot history --path <file>`, then `mise dot rollback <file>`. The rollback syncs too. |
+| Undo the last pull, rollback, or adoption | `mise dot undo` |
+| A pull or rollback was interrupted | `mise dot recover` |
+| Sync is paused | `dotfiles config status`, then [Conflicts](#conflicts) |
+| Adoption paused because a file differs | Follow the choices it prints: take one or every `.configs` version, or keep yours (see [Personal settings](#personal-settings-your-private-configs)). |
+| The automatic exchange keeps failing | `dotfiles config status` shows why. Fix it (often `gh auth login`), then run `dotfiles config sync`. |
+| Settings don't sync on a Mac you set up over SSH | Log in on the Mac, then run `dotfiles install` to start the services. |
+| Something else is off | `dotfiles config doctor`, then `mise doctor` |
+| Stop syncing on this machine | Run `mise dot origin --remove`; local history stays. To stop the watcher too, run `mise bootstrap services remove mise-history dotfiles-watch`. |
+| Publishing is paused by the secret guard | `dotfiles config status`, then see [Security](#security). |
+| Incoming changes were refused | Someone or something pushed a manifest that fails the [policy](#the-manifest-policy). Rotate your GitHub credentials, inspect `config/config.toml` in a clone of `.configs`, and fix it there. The next exchange checks again. |
+| Remove the fundamental dotfile links | `mise -C ~/.dotfiles dot unapply` |
+
+## Updating
+
+```sh
+git -C ~/.dotfiles pull
+~/.dotfiles/install.sh --config <github-user>/.configs   # or: mise bootstrap --from <origin> --from-dir ~/.dotfiles --update
+```
+
+Re-running installs what is missing; it doesn't upgrade what is installed. To
+upgrade the packages and apps:
+
+```sh
+mise -C ~/.dotfiles bootstrap packages upgrade
+```
+
+mise installs the apps itself, so Homebrew doesn't count them as installed:
+`brew upgrade` skips them, and `brew doctor` lists them under "Some directories
+in the Caskroom do not have valid metadata". That is expected; upgrade them with
+the command above. gcloud-cli is the exception, which mise skips: update it with
+`gcloud components update`.
+
+Shared changes, such as a new package, a changed alias, or a new registry
+entry, go into this repository. They never go through `.configs`.
+
+## Platforms and limitations
+
+Supported: macOS 14 (Sonoma) and later, including macOS 26 and 27, on Apple
+Silicon and Intel; Linux (x86_64 and arm64) with kernel 5.18 or later, for
+devcontainers and servers. Ubuntu 26.04 is the tested Linux.
+
+- **Intel Macs:** mise's own Homebrew manager doesn't run there, so the bootstrap task installs the `brew:` formulas with the real Homebrew. Casks work through mise on both architectures.
+- **Linux kernel 5.18 or later, running natively.** mise rewrites the headers of each Homebrew program it installs, and only Linux 5.18 and later load that layout correctly (older kernels computed the program-header address from the file offset). x86_64 emulation on an ARM machine, such as Rosetta or QEMU in Docker on Apple Silicon, still does it the old way, and zsh and about 20 other programs then fail to start. The installer stops early in both cases; use an arm64 image on Apple Silicon, or `--skip-packages`.
+- **Linux:** command-line tools only, as before. The macOS apps, preference domains, and DevOps formulas are skipped, and so is the macOS shell layer: `~/.zshrc` stays the machine's own and loads the shared `~/.common.zshrc`. User services need a systemd user session (`loginctl enable-linger` on servers).
+- **Still manual:** GitHub sign-in (once, in a browser), app logins and licenses (Bartender, 1Password, Slack, Notion, Spark, Telegram, Discord), and macOS permissions you approve when asked (Bartender's Accessibility and Screen Recording, Little Snitch's network extension, notifications for mise). Also the fonts Hack and Input Mono, and `prefix + I` in tmux.
+- **App reloading is per app.** The file and preference sync is tested end to end. Whether an app picks up a change depends on the app: the Bartender restart and iTerm2's next-launch behavior follow their documented preference handling, but they aren't tested against the live apps in CI.
+- **iTerm2:** if you change the same setting on this Mac before restarting iTerm2, this Mac's value wins, and the other value stays in history. Window arrangements and scripts aren't synced.
+- **htop** rewrites `htoprc` on exit, so expect a save after sessions where you changed something.
+- **Homebrew-built mise** can't show conflict notifications on macOS. The installer uses the official build.
+- **Mixed mise versions:** keep every machine at or above the version `install.sh` pins.
+
+## Development
+
+```sh
+brew install bats-core
+bats tests/                                  # isolated homes; no network, no services
+DOTFILES_TEST_DEFAULTS=1 bats tests/macos.bats   # writes throwaway dev.dotfiles.test.* domains
+python3 -m unittest tests/test_prefs.py
+shellcheck -x install.sh bin/dotfiles lib/*.sh
+```
+
+`tests/sync.bats` runs two machines, each with its own home and mise state,
+against a local bare origin. It covers init, enrollment, A→B and B→A, a
+conflict through its resolution, a network outage, background authentication,
+enrollment propagation, and the real `mise dot watch` across a restart. CI also
+installs on real macOS and Ubuntu runners, and checks that the LaunchAgent
+publishes a change on its own.
 
 ## Git sweep
 

@@ -1,6 +1,7 @@
 # check if copilot is installed
 if ! command -v copilot >/dev/null 2>&1; then
-    echo "WARN: 'copilot' not found -> run: brew install copilot-cli" >&2
+    # the blueprint installs copilot-cli on macOS only
+    [[ $OSTYPE == darwin* ]] && echo "WARN: 'copilot' not found -> run: brew install copilot-cli" >&2
     return  # or exit if in a script
 fi
 

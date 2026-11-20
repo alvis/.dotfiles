@@ -1,0 +1,32 @@
+schema = 1
+
+[app]
+id = "git"
+name = "Git identity"
+platforms = ["macos", "linux"]
+install = "brew:git"
+
+[compat]
+verified = true
+versions = "2.x"
+checked = "2026-11-20, git 2.52, macOS 27.2.1"
+
+[sync]
+strategy = "auto"
+default = true
+method = "file"
+reload = "none"
+paths = ["~/.gitconfig"]
+actions = ["git-split-shared"]
+
+[unsafe]
+paths = ["~/.git-credentials", "~/.config/git/credentials", "~/.config/git/config"]
+notes = """
+~/.gitconfig holds your name, email, signing key ID, and preferences. The
+shared aliases include, the global ignore file, and the GitHub credential
+helper live in the machine-local ~/.config/git/config, which .dotfiles owns
+and never syncs, so a synced ~/.gitconfig cannot break them. Enrolling moves
+the include line for .dotfiles out of ~/.gitconfig, after a backup. Do not run
+`gh auth setup-git`: it writes a machine-specific absolute path into
+~/.gitconfig. `dotfiles config doctor` warns when it finds one.
+"""
