@@ -42,7 +42,7 @@ keep what you like, and remove what you don't.
 ### Another Mac, when you already have a `.configs` repository
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/master/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/main/install.sh \
   | bash -s -- --config <github-user>/.configs
 ```
 
@@ -53,7 +53,7 @@ repository. If the repository doesn't exist yet, you're asked before it's
 created as private:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/master/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/main/install.sh \
   | bash -s -- --init --config <github-user>/.configs
 ```
 

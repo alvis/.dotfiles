@@ -2,7 +2,7 @@
 #
 # One-command workstation setup from alvis/.dotfiles.
 #
-#   curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/master/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/alvis/.dotfiles/main/install.sh \
 #     | bash -s -- --config <github-user>/.configs
 #
 # First machine (publishes your settings as a new private history):
@@ -17,7 +17,7 @@
 #   --take-remote         on adoption, replace differing local files with .configs (undoable)
 #   --skip-packages       do not install packages or tools
 #   --dotfiles-dir DIR    checkout location (default ~/.dotfiles)
-#   --ref REF             .dotfiles branch, tag, or commit to check out (default master)
+#   --ref REF             .dotfiles branch, tag, or commit to check out (default main)
 #   --dry-run             print what would change
 #   --yes                 answer yes to confirmations (never to destructive choices
 #                         that have their own flag, such as --take-remote)
@@ -235,7 +235,7 @@ else
     git -C "$DOTFILES_DIR" checkout --quiet "$DOTFILES_REF"
   fi
   [ -x "$DOTFILES_DIR/bin/dotfiles" ] ||
-    fail "the clone at $DOTFILES_DIR has no bin/dotfiles (no default branch checked out?); try --ref master"
+    fail "the clone at $DOTFILES_DIR has no bin/dotfiles (no default branch checked out?); try --ref main"
 fi
 
 # under `curl | bash` stdin is the download pipe: mise reads its questions'
