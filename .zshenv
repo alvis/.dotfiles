@@ -66,6 +66,14 @@ export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || pr
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" # loads nvm
 
 # //
+# BUN
+# //
+
+# Homebrew provides bun itself; `bun add -g` puts commands in $BUN_INSTALL/bin
+export BUN_INSTALL=${BUN_INSTALL:-$HOME/.bun}
+export PATH=$BUN_INSTALL/bin:$PATH
+
+# //
 # GO
 # //
 

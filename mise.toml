@@ -31,6 +31,7 @@ min_version = "2026.11.11"
 "brew:python@3.13" = "latest"
 "brew:pipx" = "latest"
 "brew:node" = "latest"
+"brew:bun" = "latest"
 "brew:git" = "latest"
 
 # terminal
