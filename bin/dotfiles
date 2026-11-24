@@ -723,6 +723,8 @@ cmd_bootstrap_steps() {
   # anything outside $HOME, such as Homebrew services and permissions
   [ "${DOTFILES_OFFLINE:-0}" = 0 ] || return 0
 
+  tmux_plugins
+
   if [ "$os" = macos ]; then
     brew_intel_fallback
     # spacemacs as emacs's configuration (macOS only, as before)
@@ -748,6 +750,19 @@ cmd_bootstrap_steps() {
       act "$gh" extension install dlvhdr/gh-dash || warn "could not install gh-dash"
     fi
   fi
+}
+
+# tmux plugins, without pressing prefix + I: TPM's command-line installer reads
+# the list in ~/.tmux.conf and clones only what is missing, with no tmux
+# session needed. The plugins are public, so credential helpers are off: the
+# macOS keychain helper otherwise stops to save the blank login in TPM's URLs.
+tmux_plugins() {
+  local tpm=$HOME/.tmux/plugins/tpm/bin/install_plugins
+  [ -x "$tpm" ] && command -v tmux >/dev/null 2>&1 || return 0
+  log "installing tmux plugins"
+  act env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+    GIT_TERMINAL_PROMPT=0 "$tpm" >/dev/null ||
+    warn "could not install every tmux plugin (retry: ~/.tmux/plugins/tpm/bin/install_plugins)"
 }
 
 # Intel Macs: mise skips brew: formulae there, so install them with Homebrew
@@ -1796,7 +1811,6 @@ github_auth() {
 report_manual_steps() {
   log "remaining manual steps"
   info "- Open a new terminal (or run: exec zsh) to load the shell configuration."
-  info "- In tmux, press prefix + I once to install tmux plugins."
   if [ "$(platform_os)" = macos ]; then
     info "- Install the fonts Hack and Input Mono (not redistributable here)."
     info "- Sign in to apps that need accounts (1Password, Slack, Notion, Spark, Telegram, Discord)."

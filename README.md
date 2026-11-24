@@ -109,8 +109,8 @@ installed never refers back to them.
 | `--dry-run` | Preview without changing anything. On a fresh machine the preview stops after the mise and clone steps, because the rest needs them. |
 | `--yes` | Answer yes to the ordinary confirmations. |
 
-After installing: open a new terminal, press `prefix + I` in tmux once, and
-install the fonts Hack and Input Mono.
+After installing: open a new terminal and install the fonts Hack and Input
+Mono. tmux plugins are installed for you.
 
 ## How it is organized
 
@@ -461,7 +461,7 @@ devcontainers and servers. Ubuntu 26.04 is the tested Linux.
 - **Intel Macs:** mise's own Homebrew manager doesn't run there, so the bootstrap task installs the `brew:` formulas with the real Homebrew. Casks work through mise on both architectures.
 - **Linux kernel 5.18 or later, running natively.** mise rewrites the headers of each Homebrew program it installs, and only Linux 5.18 and later load that layout correctly (older kernels computed the program-header address from the file offset). x86_64 emulation on an ARM machine, such as Rosetta or QEMU in Docker on Apple Silicon, still does it the old way, and zsh and about 20 other programs then fail to start. The installer stops early in both cases; use an arm64 image on Apple Silicon, or `--skip-packages`.
 - **Linux:** command-line tools only, as before. The macOS apps, preference domains, and DevOps formulas are skipped, and so is the macOS shell layer: `~/.zshrc` stays the machine's own and loads the shared `~/.common.zshrc`. User services need a systemd user session (`loginctl enable-linger` on servers).
-- **Still manual:** GitHub sign-in (once, in a browser), app logins and licenses (Bartender, 1Password, Slack, Notion, Spark, Telegram, Discord), and macOS permissions you approve when asked (Bartender's Accessibility and Screen Recording, Little Snitch's network extension, notifications for mise). Also the fonts Hack and Input Mono, and `prefix + I` in tmux.
+- **Still manual:** GitHub sign-in (once, in a browser), app logins and licenses (Bartender, 1Password, Slack, Notion, Spark, Telegram, Discord), and macOS permissions you approve when asked (Bartender's Accessibility and Screen Recording, Little Snitch's network extension, notifications for mise). Also the fonts Hack and Input Mono.
 - **App reloading is per app.** The file and preference sync is tested end to end. Whether an app picks up a change depends on the app: the Bartender restart and iTerm2's next-launch behavior follow their documented preference handling, but they aren't tested against the live apps in CI.
 - **iTerm2:** if you change the same setting on this Mac before restarting iTerm2, this Mac's value wins, and the other value stays in history. Window arrangements and scripts aren't synced.
 - **htop** rewrites `htoprc` on exit, so expect a save after sessions where you changed something.
